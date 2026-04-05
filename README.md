@@ -17,7 +17,7 @@ Benchmarks performed on an AMD Ryzen 9 3900X (Zen 2 architecture @ 4.6GHz).
 
 ### 3-Field Struct
 
-<img src="./comparison/Myelin%20Performance%20Vs.%20Protobuf%20and%20FlatBuffers.svg" width="725" alt="Myelin vs. Protobuf and FlatBuffers">  
+<img src="./resources/Myelin%20Performance%20Vs.%20Protobuf%20and%20FlatBuffers.svg" width="725" alt="Myelin vs. Protobuf and FlatBuffers">  
 
 *Benchmark: 3-field struct (u64, double, string) | Zen 2 @ 4.6GHz | N=1,000,000*
 
@@ -48,7 +48,7 @@ Benchmarks performed on an AMD Ryzen 9 3900X (Zen 2 architecture @ 4.6GHz).
 
 ### 10-Field Struct
 
-<img src="./comparison/Myelin%20Performance%20Vs.%20Protobuf%20and%20FlatBuffers%20(1).svg" width="725" alt="Myelin vs. Protobuf and FlatBuffers"> 
+<img src="./resources/Myelin%20Performance%20Vs.%20Protobuf%20and%20FlatBuffers%20(1).svg" width="725" alt="Myelin vs. Protobuf and FlatBuffers"> 
 
 *Benchmark: 10-field struct (Scalars, 3x Double, 2x Variable Strings) | Zen 2 @ 4.6GHz | N=1,000,000*
 
@@ -152,6 +152,11 @@ void save_with_notes() {
     view.parse("file.path", note);
 }
 ```
+
+### Dump to Json
+
+
+
 > [!NOTE]
 > ### The "ASan Tax"  
 > Note: Running with **AddressSanitizer** will result in a *~13x* slowdown ($144ns$ vs $11ns$). This is expected due to shadow memory overhead. For production-grade telemetry, always profile on raw silicon.

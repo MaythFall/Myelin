@@ -1,5 +1,3 @@
-bench
-bench_suite
-tests
-test
+tests/comparisons
 *.vscode
+exes

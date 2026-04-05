@@ -97,6 +97,22 @@ namespace myelin {
         }
     }
 
+    template <typename SpanType, endian_policy Policy = endian_policy::native>
+    inline std::string dumpBlob(const SpanType& blob) {        
+        if (blob.empty()) return "[]";
+        std::string out = "[ ";
+        for (size_t i = 0; i < blob.size(); ++i) {
+            using E = typename SpanType::value_type;  
+            if constexpr (std::is_arithmetic_v<E>) {
+                out += std::to_string(apply_policy<Policy>(blob[i]));
+            } else {
+                out += (char)blob[i];
+            }
+            if (i < blob.size() - 1) out += ", ";
+        }
+        return out + " ]";
+    }
+
     // --- CRTP Base View ---
     template <typename Derived, typename Impl, endian_policy Policy = endian_policy::native>
     struct basic_view {
@@ -194,6 +210,93 @@ namespace myelin {
                 return apply_policy<Policy>(val);
             }
         }
+
+        inline std::string to_json() const {
+            std::string output = "[\n";
+            size_t current = 0;
+            boost::pfr::for_each_field(Derived{}, [&](const auto& dummy) {
+                using T = std::decay_t<decltype(dummy)>;
+                
+                uint32_t b_off; 
+                std::memcpy(&b_off, &this->header_ptr[current * 5 + 1], 4);
+                b_off = apply_policy<Policy>(b_off);
+
+                output += "   { \"" + std::to_string(current) + "\" : ";
+
+                if constexpr (is_continuous_v<T>) {
+                    uint32_t sz; 
+                    std::memcpy(&sz, this->body_ptr + b_off, 4);
+                    sz = apply_policy<Policy>(sz);
+
+                    using E = std::ranges::range_value_t<T>;
+                    size_t st = align_to(b_off + 4, alignof(E));
+
+                    if constexpr (is_string_type_v<T>) {
+                        output += "\"" + std::string((char*)(this->body_ptr + st), sz) + "\"";
+                    } else {
+                        output += dumpBlob<std::span<E>, Policy>(std::span<E>((E*)(this->body_ptr + st), sz / sizeof(E)));
+                    }
+                } else {
+                    T val = *(T*)(this->body_ptr + b_off);
+                    val = apply_policy<Policy>(val);
+
+                    if constexpr (std::is_same_v<T, bool>) output += (val ? "true" : "false");
+                    else if constexpr (std::is_integral_v<T> && sizeof(T) == 1) output += std::to_string((int)val);
+                    else output += std::to_string(val);
+                }
+
+                output += (current < num_fields - 1) ? " },\n" : " }\n";
+                current++;
+            });
+            return output + "]";
+        }
+
+        inline std::string to_json(const std::array<std::string_view, num_fields>& field_names) const {
+            std::string output = "[\n";
+            size_t current = 0;
+
+            boost::pfr::for_each_field(Derived{}, [&](const auto& dummy) {
+                using T = std::decay_t<decltype(dummy)>;
+                uint32_t b_off; 
+                std::memcpy(&b_off, &this->header_ptr[current * 5 + 1], 4);
+                b_off = apply_policy<Policy>(b_off);
+
+                std::string key = field_names[current].empty() ? std::to_string(current) : std::string(field_names[current]);
+                output += "   { \"" + key + "\" : ";
+
+                if constexpr (is_continuous_v<T>) {
+                    uint32_t sz; 
+                    std::memcpy(&sz, this->body_ptr + b_off, 4);
+                    sz = apply_policy<Policy>(sz);
+                    
+                    using E = std::ranges::range_value_t<T>;
+                    size_t st = align_to(b_off + 4, alignof(E));
+                    
+                    if constexpr (is_string_type_v<T>) {
+                        output += "\"" + std::string((char*)(this->body_ptr + st), sz) + "\"";
+                    } else {
+                        output += dumpBlob<std::span<E>, Policy>(std::span<E>((E*)(this->body_ptr + st), sz / sizeof(E)));
+                    }
+                } else {
+                    T val = *(T*)(this->body_ptr + b_off);
+                    val = apply_policy<Policy>(val); // Policy swap on the actual data
+                    
+                    if constexpr (std::is_same_v<T, bool>) {
+                        output += (val ? "true" : "false");
+                    } else if constexpr (std::is_integral_v<T> && sizeof(T) == 1) {
+                        output += std::to_string((int)val);
+                    } else {
+                        output += std::to_string(val);
+                    }
+                }
+
+                output += (current < num_fields - 1) ? " },\n" : " }\n";
+                current++;
+            });
+
+            return output + "]";
+        }
+
     };
 
     // --- MEM VIEW ---
