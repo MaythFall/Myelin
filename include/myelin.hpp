@@ -30,14 +30,39 @@ namespace myelin {
         STR = 0x0F, VEC = 0x20, ARR = 0x10, SPAN = 0x30
     };
 
+    enum class endian_policy {
+        native,
+        network // Force Big Endian (Network Byte Order)
+    };
+
     // --- Helpers ---
     template <typename T>
     inline constexpr bool is_string_type_v = std::is_same_v<std::decay_t<T>, std::string> || std::is_same_v<std::decay_t<T>, std::string_view>;
+    
     template <typename T>
     inline constexpr bool is_continuous_v = std::ranges::contiguous_range<T> && !std::is_array_v<std::decay_t<T>>;
 
     inline size_t align_to(size_t offset, size_t a) {
         return (a == 0) ? offset : (offset + (a - 1)) & ~(a - 1);
+    }
+
+    // Helper to conditionally swap bytes based on policy
+    template <endian_policy Policy, typename T>
+    inline constexpr T apply_policy(T val) {
+        if constexpr (Policy == endian_policy::network && std::endian::native == std::endian::little) {
+            if constexpr (std::is_integral_v<T> && sizeof(T) > 1) {
+                return std::byteswap(val);
+            } 
+            else if constexpr (std::is_floating_point_v<T>) {
+                // Bit-cast to int, swap, then cast back to float/double
+                if constexpr (sizeof(T) == 4) {
+                    return std::bit_cast<T>(std::byteswap(std::bit_cast<uint32_t>(val)));
+                } else if constexpr (sizeof(T) == 8) {
+                    return std::bit_cast<T>(std::byteswap(std::bit_cast<uint64_t>(val)));
+                }
+            }
+        }
+        return val;
     }
 
     template <typename T>
@@ -52,8 +77,28 @@ namespace myelin {
         return TypeMap::U8;
     }
 
+    template <typename T>
+    inline void flipEndiannessBlob(T& blob) {
+        if constexpr (!is_continuous_v<T>) return;
+        using E = std::ranges::range_value_t<T>;
+        if constexpr (sizeof(E) <= 1) return;
+
+        for (auto& v : blob) {
+            if constexpr (std::is_integral_v<E>) {
+                v = std::byteswap(v);
+            } else if constexpr (std::is_floating_point_v<E>) {
+                // Using bit_cast to pun floats/doubles to ints for the swap
+                if constexpr (sizeof(E) == 4) {
+                    v = std::bit_cast<E>(std::byteswap(std::bit_cast<uint32_t>(v)));
+                } else if constexpr (sizeof(E) == 8) {
+                    v = std::bit_cast<E>(std::byteswap(std::bit_cast<uint64_t>(v)));
+                }
+            }
+        }
+    }
+
     // --- CRTP Base View ---
-    template <typename Derived, typename Impl>
+    template <typename Derived, typename Impl, endian_policy Policy = endian_policy::native>
     struct basic_view {
         static constexpr uint32_t num_fields = boost::pfr::tuple_size_v<Derived>;
         static constexpr size_t header_size = num_fields * 5;
@@ -62,7 +107,6 @@ namespace myelin {
         uint8_t* body_ptr = nullptr;
         size_t   act_size = 0;
 
-        // O(N) calculation of required space and alignment counts
         inline size_t resize_calc(const Derived& obj, uint8_t* counts) const {
             size_t req = 0;
             boost::pfr::for_each_field(obj, [&](const auto& field) {
@@ -80,13 +124,11 @@ namespace myelin {
             return req;
         }
 
-        // O(N) Single-Pass Bucket Packer
         inline size_t pack_data_bucketed(const Derived& obj, uint8_t* counts) {
-            uint32_t cursors[4];
-            cursors[0] = 0;                                      // 8-byte bucket
-            cursors[1] = counts[0] << 3;                         // 4-byte bucket
-            cursors[2] = cursors[1] + (counts[1] << 2);          // 2-byte bucket
-            cursors[3] = cursors[2] + (counts[2] << 1);          // 1-byte bucket
+            uint32_t cursors[4] = {0};
+            cursors[1] = counts[0] << 3;
+            cursors[2] = cursors[1] + (counts[1] << 2);
+            cursors[3] = cursors[2] + (counts[2] << 1);
             
             size_t blob_cursor = cursors[3] + counts[3]; 
 
@@ -102,20 +144,33 @@ namespace myelin {
                     else if constexpr (a == 2) write_off = cursors[2], cursors[2] += 2;
                     else                       write_off = cursors[3], cursors[3] += 1;
 
-                    std::memcpy(&this->header_ptr[idx * 5 + 1], &write_off, 4);
-                    std::memcpy(this->body_ptr + write_off, &field, sizeof(T));
+                    uint32_t le_off = apply_policy<Policy>(write_off);
+                    std::memcpy(&this->header_ptr[idx * 5 + 1], &le_off, 4);
+
+                    T final_val = apply_policy<Policy>(field);
+                    std::memcpy(this->body_ptr + write_off, &final_val, sizeof(T));
                 } else {
                     blob_cursor = align_to(blob_cursor, 4);
                     uint32_t write_off = (uint32_t)blob_cursor;
                     using E = std::ranges::range_value_t<T>;
                     uint32_t d_sz = (uint32_t)(std::ranges::size(field) * sizeof(E));
                     
-                    std::memcpy(&this->header_ptr[idx * 5 + 1], &write_off, 4);
-                    std::memcpy(this->body_ptr + write_off, &d_sz, 4);
+                    uint32_t le_off = apply_policy<Policy>(write_off);
+                    std::memcpy(&this->header_ptr[idx * 5 + 1], &le_off, 4);
+                    
+                    uint32_t le_sz = apply_policy<Policy>(d_sz);
+                    std::memcpy(this->body_ptr + write_off, &le_sz, 4);
                     
                     size_t d_start = align_to(write_off + 4, alignof(E));
+                    
                     std::memcpy(this->body_ptr + d_start, std::ranges::data(field), d_sz);
                     blob_cursor = d_start + d_sz;
+    
+                    // Only pay the loop tax if we are actually on a Network Policy
+                    if constexpr (Policy == endian_policy::network) {
+                        std::span<E> dest_span((E*)(this->body_ptr + d_start), d_sz / sizeof(E));
+                        flipEndiannessBlob(dest_span);
+                    }
                 }
             });
             return blob_cursor;
@@ -125,20 +180,26 @@ namespace myelin {
         auto get_field() const {
             using T = boost::pfr::tuple_element_t<N, Derived>;
             uint32_t b_off; std::memcpy(&b_off, &header_ptr[N * 5 + 1], 4);
+            b_off = apply_policy<Policy>(b_off);
+
             if constexpr (is_continuous_v<T>) {
                 uint32_t sz; std::memcpy(&sz, body_ptr + b_off, 4);
+                sz = apply_policy<Policy>(sz);
                 using E = std::ranges::range_value_t<T>;
                 size_t start = align_to(b_off + 4, alignof(E));
                 if constexpr (is_string_type_v<T>) return std::string_view((char*)(body_ptr + start), sz);
                 else return std::span<E>((E*)(body_ptr + start), sz / sizeof(E));
-            } else { return *(T*)(body_ptr + b_off); }
+            } else { 
+                T val = *(T*)(body_ptr + b_off);
+                return apply_policy<Policy>(val);
+            }
         }
     };
 
     // --- MEM VIEW ---
-    template <typename Derived>
-    struct mem_view : public basic_view<Derived, mem_view<Derived>> {
-        std::array<uint8_t, basic_view<Derived, mem_view<Derived>>::header_size> h_buf{};
+    template <typename Derived, endian_policy Policy = endian_policy::native>
+    struct mem_view : public basic_view<Derived, mem_view<Derived, Policy>, Policy> {
+        std::array<uint8_t, basic_view<Derived, mem_view<Derived, Policy>, Policy>::header_size> h_buf{};
         size_t capacity = 0;
         mem_view() { this->header_ptr = h_buf.data(); }
         ~mem_view() { if (this->body_ptr) free(this->body_ptr); }
@@ -155,21 +216,24 @@ namespace myelin {
 
         inline void pack_to_disk(const std::string& path, std::string_view note = "") {
             std::ofstream ofs(path, std::ios::binary);
-            uint32_t f = this->num_fields; ofs.write((char*)&f, 4);
+            uint32_t f = apply_policy<Policy>((uint32_t)this->num_fields); ofs.write((char*)&f, 4);
             ofs.write((char*)this->header_ptr, this->header_size);
-            uint32_t s = (uint32_t)this->act_size; ofs.write((char*)&s, 4);
-            ofs.write((char*)this->body_ptr, s);
+            uint32_t s = apply_policy<Policy>((uint32_t)this->act_size); ofs.write((char*)&s, 4);
+            ofs.write((char*)this->body_ptr, this->act_size);
             if (!note.empty()) {
                 uint32_t n = (uint32_t)note.size(); ofs.write((char*)note.data(), n);
-                ofs.write((char*)&n, 4); ofs.write("MYELIN_", 7);
+                uint32_t le_n = apply_policy<Policy>(n);
+                ofs.write((char*)&le_n, 4); ofs.write("MYELIN_", 7);
             }
         }
 
         inline void parse(const std::string& path, std::string* note_out = nullptr) {
             std::ifstream ifs(path, std::ios::binary);
             if (!ifs) return;
-            ifs.seekg(4); ifs.read((char*)this->header_ptr, this->header_size);
+            uint32_t f; ifs.read((char*)&f, 4); // Check fields if needed
+            ifs.read((char*)this->header_ptr, this->header_size);
             uint32_t sz; ifs.read((char*)&sz, 4);
+            sz = apply_policy<Policy>(sz);
             if (this->body_ptr) free(this->body_ptr);
             this->body_ptr = (uint8_t*)malloc(sz); ifs.read((char*)this->body_ptr, sz);
             this->act_size = sz;
@@ -177,6 +241,7 @@ namespace myelin {
                 ifs.seekg(-7, std::ios::end); char maj[8] = {0}; ifs.read(maj, 7);
                 if (std::string_view(maj) == "MYELIN_") {
                     uint32_t n_sz; ifs.seekg(-11, std::ios::end); ifs.read((char*)&n_sz, 4);
+                    n_sz = apply_policy<Policy>(n_sz);
                     ifs.seekg(-(11 + (long)n_sz), std::ios::end); note_out->resize(n_sz);
                     ifs.read(note_out->data(), n_sz);
                 }
@@ -185,8 +250,8 @@ namespace myelin {
     };
 
     // --- MAP VIEW ---
-    template <typename Derived>
-    struct map_view : public basic_view<Derived, map_view<Derived>> {
+    template <typename Derived, endian_policy Policy = endian_policy::native>
+    struct map_view : public basic_view<Derived, map_view<Derived, Policy>, Policy> {
         int fd = -1; void* mmap_base = nullptr; size_t mapped_size = 0;
 
         ~map_view() { if (mmap_base) munmap(mmap_base, mapped_size); if (fd != -1) close(fd); }
@@ -198,7 +263,7 @@ namespace myelin {
                 mmap_base = mmap(NULL, mapped_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
                 this->header_ptr = (uint8_t*)mmap_base + 4;
                 uint32_t b_sz; std::memcpy(&b_sz, this->header_ptr + this->header_size, 4);
-                this->act_size = b_sz;
+                this->act_size = apply_policy<Policy>(b_sz);
                 this->body_ptr = this->header_ptr + this->header_size + 4;
             }
         }
@@ -208,6 +273,7 @@ namespace myelin {
             const uint8_t* footer = (uint8_t*)mmap_base + mapped_size - 7;
             if (std::memcmp(footer, "MYELIN_", 7) != 0) return "";
             uint32_t n_sz; std::memcpy(&n_sz, (uint8_t*)mmap_base + mapped_size - 11, 4);
+            n_sz = apply_policy<Policy>(n_sz);
             return std::string((char*)mmap_base + mapped_size - 11 - n_sz, n_sz);
         }
 
@@ -225,22 +291,22 @@ namespace myelin {
                 if (ftruncate(fd, total_req) == -1) throw std::runtime_error("MYELIN: ftruncate failed");
                 mmap_base = mmap(NULL, total_req, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
                 mapped_size = total_req;
-                uint32_t f = this->num_fields; std::memcpy(mmap_base, &f, 4);
+                uint32_t f = apply_policy<Policy>((uint32_t)this->num_fields); std::memcpy(mmap_base, &f, 4);
                 this->header_ptr = (uint8_t*)mmap_base + 4;
                 this->body_ptr = this->header_ptr + this->header_size + 4;
             }
 
             this->act_size = this->pack_data_bucketed(obj, counts);
             
-            uint32_t s = (uint32_t)this->act_size;
+            uint32_t s = apply_policy<Policy>((uint32_t)this->act_size);
             std::memcpy(this->header_ptr + this->header_size, &s, 4);
 
             if (!note.empty()) {
                 uint8_t* n_ptr = this->body_ptr + req_body;
                 std::memcpy(n_ptr, note.data(), note.size());
-                uint32_t n_sz = (uint32_t)note.size();
-                std::memcpy(n_ptr + n_sz, &n_sz, 4);
-                std::memcpy(n_ptr + n_sz + 4, "MYELIN_", 7);
+                uint32_t n_sz = apply_policy<Policy>((uint32_t)note.size());
+                std::memcpy(n_ptr + (uint32_t)note.size(), &n_sz, 4);
+                std::memcpy(n_ptr + (uint32_t)note.size() + 4, "MYELIN_", 7);
             }
         }
     };

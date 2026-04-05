@@ -53,8 +53,17 @@ Most serializers treat data like a tree. Myelin treats it like a **memory bus**.
 
 ---
  
- ### Usage
+### Usage
 Myelin is header-only. Define your schema as a standard C++ `struct` and let the compiler do the work. No IDL, no macros, no boilerplate.
+You do have the option to set the endianess of the data when initializing with `endian_policy` either `native` or `network`;
+  
+> [!IMPORTANT]
+> ### Manual Access & Endianness
+> When using `endian_policy::network`, Myelin ensures cross-platform compatibility by storing all scalars and blob-elements (e.g., `uint32_t` inside a `std::vector`) in **Big Endian** format.
+>
+> * **API Access**: Calling `get_field<N>()` handles the reverse-swap automatically for scalars. However, accessing a `std::vector` or other blob types requires manual reversal as the returned `std::span` points directly to the stored memory.
+> * **Manual Access**: If you access the underlying `body_ptr` or `mmap` region directly, you must manually reverse the endianness of the elements.
+> * **Strings/Bytes**: Standard `std::string` or `std::vector<uint8_t>` are stored as raw byte-streams and are unaffected by endianness policies.
 
 
 ### Basic Serialization
@@ -114,7 +123,7 @@ void save_with_notes() {
     view.parse("file.path", note);
 }
 ```
-
+> [!NOTE]
 > ### The "ASan Tax"  
 > Note: Running with **AddressSanitizer** will result in a *~13x* slowdown ($144ns$ vs $11ns$). This is expected due to shadow memory overhead. For production-grade telemetry, always profile on raw silicon.
 
