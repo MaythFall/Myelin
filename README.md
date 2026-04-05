@@ -1,7 +1,7 @@
 # Myelin
 ### Sub-12ns serialization for the Axon ecosystem.
 
-**Myelin** is a high-velocity, zero-copy C++20 serialization engine. It wasn't built to be "feature-rich"; it was built to be fast enough that the serializer effectively disappears from your performance profile. By leveraging Single-Pass Bucket Packing and compile-time reflection via `boost::pfr`, Myelin achieves mechanical sympathy with modern x86_64 pipelines.
+**Myelin** is a high-velocity, zero-copy C++20 serialization engine. It wasn't built to be "feature-rich"; it was built to be fast enough that the serializer effectively disappears from your performance profile. By leveraging single-pass packing and compile-time reflection via `boost::pfr`, Myelin achieves mechanical sympathy with modern x86_64 pipelines.
 
 ---
 
@@ -15,7 +15,9 @@ Benchmarks performed on an AMD Ryzen 9 3900X (Zen 2 architecture @ 4.6GHz).
 
 ### Performance vs. Other C++ Serializers
 
-![Myelin vs. Protobuf and FlatBuffers](./comparison/Myelin%20Performance%20Vs.%20Protobuf%20and%20FlatBuffers.svg)
+### 3-Field Struct
+
+<img src="./comparison/Myelin%20Performance%20Vs.%20Protobuf%20and%20FlatBuffers.svg" width="725" alt="Myelin vs. Protobuf and FlatBuffers">  
 
 *Benchmark: 3-field struct (u64, double, string) | Zen 2 @ 4.6GHz | N=1,000,000*
 
@@ -29,7 +31,7 @@ Benchmarks performed on an AMD Ryzen 9 3900X (Zen 2 architecture @ 4.6GHz).
 
 *~11,000,000 total iterations across 11 stress tests*
 
-| Run # | Myelin (ns/op) | Protobuf (ns/op) | FlatBuffers (ns/op) |
+| Run # | Myelin | Protobuf | FlatBuffers |
 | :--- | :--- | :--- | :--- |
 | 1 | 6.30 | 26.68 | **62.99** |
 | 2 | 6.30 | 26.23 | 64.87 |
@@ -42,7 +44,34 @@ Benchmarks performed on an AMD Ryzen 9 3900X (Zen 2 architecture @ 4.6GHz).
 | 9 | **6.15** | **24.77** | 64.26 |
 | 10 | 6.72 | 24.97 | 65.28 |
 | 11 | 6.25 | 25.78 | 63.46 |
+<small>Units are ns/op</small>
 
+### 10-Field Struct
+
+<img src="./comparison/Myelin%20Performance%20Vs.%20Protobuf%20and%20FlatBuffers%20(1).svg" width="725" alt="Myelin vs. Protobuf and FlatBuffers"> 
+
+*Benchmark: 10-field struct (Scalars, 3x Double, 2x Variable Strings) | Zen 2 @ 4.6GHz | N=1,000,000*
+
+| Engine | Latency (AVG) | Throughput (AVG) | Efficiency |
+| --- | --- | --- | --- |
+| **Myelin** (Native) | **22.80 $ns$** | **43.86 $Mops/s$** | **$1.0x$ (Baseline)** |
+| **Myelin** (Net) | **22.82 $ns$** | **43.82 $Mops/s$** | **$1.0x$ (Baseline)** |
+| Protobuf | 80.79 $ns$ | 12.38 $Mops/s$ | $~3.5x$ |
+| FlatBuffers | 163.67 $ns$ | 6.11 $Mops/s$ | $~7.2x$ |
+
+##### Full RUn Series
+
+*~6,000,000 total iterations across 11 stress tests*
+
+| Run # | Myelin (Native) | Myelin (Net) | Protobuf | FlatBuffers |
+| :--- | :--- | :--- | :--- | :--- |
+| 1 | 23.70  | 25.25  | 84.19  | 168.31  |
+| 2 | 22.97  | 23.10  | 77.01  | 159.95  |
+| 3 | 22.32  | 23.44  | 77.98  | 161.89  |
+| 4 | 22.47  | 23.60  | 79.09  | 164.59  |
+| 5 | 22.51  | 24.32  | 85.73  | 167.34  |
+| 6 | 22.85  | 23.23  | 80.75  | 159.91  |
+<small>Units are ns/op</small>
 ## Why it's fast
 Most serializers treat data like a tree. Myelin treats it like a **memory bus**.
 
