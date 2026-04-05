@@ -1,0 +1,7 @@
+namespace bench_fb;
+table Packet {
+  id:uint64;
+  timestamp:double;
+  text:string;
+}
+root_type Packet;

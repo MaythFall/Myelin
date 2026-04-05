@@ -1,0 +1,7 @@
+syntax = "proto3";
+package bench_pb;
+message Packet {
+  uint64 id = 1;
+  double timestamp = 2;
+  string text = 3;
+}
