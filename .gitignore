@@ -1,3 +1,4 @@
 tests/comparisons
 *.vscode
 exes
+temp

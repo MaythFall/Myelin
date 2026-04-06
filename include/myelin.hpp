@@ -145,6 +145,21 @@ namespace myelin {
     template <typename T>
     inline constexpr bool is_continuous_v = std::ranges::contiguous_range<T> && !std::is_array_v<std::decay_t<T>>;
 
+    template <typename T>
+    inline constexpr bool is_noncontinuous_range_v = !std::ranges::contiguous_range<T> && !std::is_scalar_v<T>;
+
+    template <typename T> struct is_vector : std::false_type {};
+    template <typename T, typename Alloc> 
+    struct is_vector<std::vector<T, Alloc>> : std::true_type {};
+    template <typename T> 
+    inline constexpr bool is_vector_v = is_vector<std::remove_cvref_t<T>>::value;
+
+    template <typename T> struct is_std_array : std::false_type {};
+    template <typename T, std::size_t N> 
+    struct is_std_array<std::array<T, N>> : std::true_type {};
+    template <typename T> 
+    inline constexpr bool is_std_array_v = is_std_array<std::remove_cvref_t<T>>::value;
+
     inline size_t align_to(size_t offset, size_t a) {
         return (a == 0) ? offset : (offset + (a - 1)) & ~(a - 1);
     }
@@ -171,17 +186,37 @@ namespace myelin {
     template <typename T>
     inline constexpr TypeMap get_type_tag() {
         using U = std::decay_t<T>;
+
         if constexpr (is_string_type_v<U>) return TypeMap::STR;
-        if constexpr (std::ranges::contiguous_range<U>) return static_cast<TypeMap>(0x20 | (uint8_t)get_type_tag<std::ranges::range_value_t<U>>());
+
+        if constexpr (is_continuous_v<U>) {
+            constexpr uint8_t inner_tag = (uint8_t)get_type_tag<std::ranges::range_value_t<U>>();
+            
+            if constexpr (std::is_array_v<U> || is_std_array_v<U>) {
+                return static_cast<TypeMap>((uint8_t)TypeMap::ARR | inner_tag);
+            } else if constexpr (is_vector_v<U>) {
+                return static_cast<TypeMap>((uint8_t)TypeMap::VEC | inner_tag);
+            } else {
+                return static_cast<TypeMap>((uint8_t)TypeMap::SPAN | inner_tag);
+            }
+        }
+
         if constexpr (std::is_same_v<U, uint64_t>) return TypeMap::U64;
-        if constexpr (std::is_same_v<U, double>)   return TypeMap::DOUBLE;
+        if constexpr (std::is_same_v<U, int64_t>)  return TypeMap::I64;
         if constexpr (std::is_same_v<U, uint32_t>) return TypeMap::U32;
+        if constexpr (std::is_same_v<U, int32_t>)  return TypeMap::I32;
+        if constexpr (std::is_same_v<U, uint16_t>) return TypeMap::U16;
+        if constexpr (std::is_same_v<U, int16_t>)  return TypeMap::I16;
         if constexpr (std::is_same_v<U, float>)    return TypeMap::FLOAT;
-        return TypeMap::U8;
+        if constexpr (std::is_same_v<U, double>)   return TypeMap::DOUBLE;
+        if constexpr (std::is_same_v<U, bool>)     return TypeMap::BOOL;
+        if constexpr (std::is_same_v<U, char>)     return TypeMap::CHAR;
+
+        return TypeMap::U8; // Default fallback
     }
 
     template <typename T>
-    inline void flipEndiannessBlob(T& blob) {
+    inline constexpr void flipEndiannessBlob(T& blob) {
         if constexpr (!is_continuous_v<T>) return;
         using E = std::ranges::range_value_t<T>;
         if constexpr (sizeof(E) <= 1) return;
