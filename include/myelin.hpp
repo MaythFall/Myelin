@@ -1,4 +1,21 @@
 #pragma once
+/*
+ * Myelin - High-Velocity C++20 Serialization Engine
+ * Copyright (C) 2026 Adam Brazda
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
 #include <bit>
 #include <cstdint>
 #include <vector>
@@ -13,6 +30,7 @@
 #include <fstream>
 #include <filesystem>
 #include <stdexcept>
+#include <charconv>
 #include "boost/pfr.hpp"
 
 #if defined(__linux__) || defined(__unix__)
@@ -34,6 +52,14 @@ namespace myelin {
         native,
         network // Force Big Endian (Network Byte Order)
     };
+
+    template <typename T>
+    inline std::string to_string(T val) {
+        char buf[32];
+        auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), val);
+        if (ec == std::errc{}) return std::string(buf, ptr - buf);
+        return "";
+    }
 
     // --- Helpers ---
     template <typename T>
@@ -100,17 +126,33 @@ namespace myelin {
     template <typename SpanType, endian_policy Policy = endian_policy::native>
     inline std::string dumpBlob(const SpanType& blob) {        
         if (blob.empty()) return "[]";
-        std::string out = "[ ";
+        
+        using E = typename SpanType::value_type;
+        std::string out;
+        
+        if constexpr (std::is_same_v<E, char> || std::is_same_v<E, unsigned char>) {
+            out.reserve(blob.size() + 2);
+            out = "\"";
+            out.append(reinterpret_cast<const char*>(std::ranges::data(blob)), std::ranges::size(blob));
+            out += "\"";
+            return out;
+        } 
+
+        out.reserve((blob.size() << 2) + 2);
+        out = "[ ";
+        
         for (size_t i = 0; i < blob.size(); ++i) {
-            using E = typename SpanType::value_type;  
-            if constexpr (std::is_arithmetic_v<E>) {
-                out += std::to_string(apply_policy<Policy>(blob[i]));
-            } else {
-                out += (char)blob[i];
+            if constexpr (std::is_arithmetic_v<E> && !std::is_same_v<E, bool>) {
+                out += myelin::to_string(apply_policy<Policy>(blob[i]));
+            } 
+            else if constexpr (std::is_same_v<E, bool>) {
+                out += (apply_policy<Policy>(blob[i]) ? "true" : "false");
             }
             if (i < blob.size() - 1) out += ", ";
         }
-        return out + " ]";
+        
+        out += " ]";
+        return out;
     }
 
     // --- CRTP Base View ---
@@ -212,7 +254,9 @@ namespace myelin {
         }
 
         inline std::string to_json() const {
-            std::string output = "[\n";
+            std::string output;
+            output.reserve((act_size << 1) + (num_fields << 3));
+            output += "[\n";
             size_t current = 0;
             boost::pfr::for_each_field(Derived{}, [&](const auto& dummy) {
                 using T = std::decay_t<decltype(dummy)>;
@@ -221,7 +265,7 @@ namespace myelin {
                 std::memcpy(&b_off, &this->header_ptr[current * 5 + 1], 4);
                 b_off = apply_policy<Policy>(b_off);
 
-                output += "   { \"" + std::to_string(current) + "\" : ";
+                output += "   { \"" + myelin::to_string(current) + "\" : ";
 
                 if constexpr (is_continuous_v<T>) {
                     uint32_t sz; 
@@ -241,18 +285,21 @@ namespace myelin {
                     val = apply_policy<Policy>(val);
 
                     if constexpr (std::is_same_v<T, bool>) output += (val ? "true" : "false");
-                    else if constexpr (std::is_integral_v<T> && sizeof(T) == 1) output += std::to_string((int)val);
-                    else output += std::to_string(val);
+                    else if constexpr (std::is_integral_v<T> && sizeof(T) == 1) output += myelin::to_string((int)val);
+                    else output += myelin::to_string(val);
                 }
 
                 output += (current < num_fields - 1) ? " },\n" : " }\n";
                 current++;
             });
-            return output + "]";
+            output += "]";
+            return output;
         }
 
         inline std::string to_json(const std::array<std::string_view, num_fields>& field_names) const {
-            std::string output = "[\n";
+            std::string output;
+            output.reserve((act_size << 1) + (num_fields << 3) + (num_fields << 3));
+            output += "[\n";
             size_t current = 0;
 
             boost::pfr::for_each_field(Derived{}, [&](const auto& dummy) {
@@ -261,7 +308,7 @@ namespace myelin {
                 std::memcpy(&b_off, &this->header_ptr[current * 5 + 1], 4);
                 b_off = apply_policy<Policy>(b_off);
 
-                std::string key = field_names[current].empty() ? std::to_string(current) : std::string(field_names[current]);
+                std::string key = field_names[current].empty() ? myelin::to_string(current) : std::string(field_names[current]);
                 output += "   { \"" + key + "\" : ";
 
                 if constexpr (is_continuous_v<T>) {
@@ -284,9 +331,9 @@ namespace myelin {
                     if constexpr (std::is_same_v<T, bool>) {
                         output += (val ? "true" : "false");
                     } else if constexpr (std::is_integral_v<T> && sizeof(T) == 1) {
-                        output += std::to_string((int)val);
+                        output += myelin::to_string((int)val);
                     } else {
-                        output += std::to_string(val);
+                        output += myelin::to_string(val);
                     }
                 }
 
@@ -294,7 +341,9 @@ namespace myelin {
                 current++;
             });
 
-            return output + "]";
+            output += "]";
+            output.resize(output.size());
+            return output;
         }
 
     };

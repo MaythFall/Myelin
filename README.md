@@ -1,17 +1,24 @@
 # Myelin
-### Sub-12ns serialization for the Axon ecosystem.
+### Sub-12ns(Simple)/Sub-25ns(Complex) serialization for the Axon ecosystem.
 
-**Myelin** is a high-velocity, zero-copy C++20 serialization engine. It wasn't built to be "feature-rich"; it was built to be fast enough that the serializer effectively disappears from your performance profile. By leveraging single-pass packing and compile-time reflection via `boost::pfr`, Myelin achieves mechanical sympathy with modern x86_64 pipelines.
+**Myelin** is a high-velocity, zero-copy C++23 serialization engine. It wasn't built to be "feature-rich"; it was built to be fast enough that the serializer effectively disappears from your performance profile. By leveraging single-pass packing and compile-time reflection via `boost::pfr`, Myelin achieves mechanical sympathy with modern x86_64 pipelines.
 
 ---
 
-## Benchmarks
+### Official Benchmarks
 Benchmarks performed on an AMD Ryzen 9 3900X (Zen 2 architecture @ 4.6GHz).  
-|Operation | Latency | Throughput | Notes |
-| --- | --- | --- | --- |
-|Mem Serialize| $11.2ns$ | $89.3$ $Mops/s$| Linear $O(N)$ walk| 
-| Field Access | $0.65ns$| $\infty$ | Direct pointer arithmetic |
-| Mmap Write | $17.4ns$ | $57.6$ $Mops/s$ | Kernel page-cache bound | 
+All tests conducted and averaged over 5,000,000 iterations and `-O3` optimization.
+
+| Operation | Mode | Latency | Throughput | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| **Scalar Serialize** | `mem_view` | 5.21 $ns$ | 191.94 $Mops/s$ | CPU L1 Cache bound |
+| **Complex Serialize** | `mem_view` | 14.56 $ns$ | 68.68 $Mops/s$ | Incl. strings & vectors |
+| **Field Access** | `mem_view` | 0.65 $ns$ | 1,538.46 $Mops/s$ | Direct L1 cache hit |
+| **JSON Export** | `mem_view` | 630.41 $ns$ | 1.59 $Mops/s$ | `to_chars` optimized |
+| **Scalar Serialize** | `map_view` | 12.04 $ns$ | 83.06 $Mops/s$ | Persistent (Page Cache) |
+| **Complex Serialize** | `map_view` | 22.02 $ns$ | 45.41 $Mops/s$ | Persistent (Page Cache) |
+| **Field Access** | `map_view` | 0.53 $ns$ | 1,886.79 $Mops/s$ | Direct pointer arithmetic |
+| **JSON Export** | `map_view` | 599.81 $ns$ | 1.67 $Mops/s$ | Zero-copy persistence |
 
 ### Performance vs. Other C++ Serializers
 
@@ -59,7 +66,7 @@ Benchmarks performed on an AMD Ryzen 9 3900X (Zen 2 architecture @ 4.6GHz).
 | Protobuf | 80.79 $ns$ | 12.38 $Mops/s$ | $~3.5x$ |
 | FlatBuffers | 163.67 $ns$ | 6.11 $Mops/s$ | $~7.2x$ |
 
-##### Full RUn Series
+##### Full Run Series
 
 *~6,000,000 total iterations across 11 stress tests*
 
@@ -82,9 +89,10 @@ Most serializers treat data like a tree. Myelin treats it like a **memory bus**.
 
 ---
  
-### Usage
-Myelin is header-only. Define your schema as a standard C++ `struct` and let the compiler do the work. No IDL, no macros, no boilerplate.
-You do have the option to set the endianess of the data when initializing with `endian_policy` either `native` or `network`;
+## Installation
+Myelin is header-only. Simply copy `myelin.hpp` into your project.
+**Dependencies:** * C++23 (or higher)
+* `boost/pfr.hpp` (Minimum 1.2.0)
   
 > [!IMPORTANT]
 > ### Manual Access & Endianness
@@ -106,7 +114,9 @@ struct Packet {
 };
 
 void run() {
-    myelin::mem_view<Packet> view;
+    //Endian policy is optional and default to Native(Little Endian)
+    //Alternative is endian_policy::network (Big Endian)
+    myelin::mem_view<Packet, myelin::endian_policy::native> view;
     Packet p{42, 3.14, "Velocity"};
 
     // Serialize to RAM in ~11ns
@@ -155,12 +165,31 @@ void save_with_notes() {
 
 ### Dump to Json
 
+```cpp
+void dump_to_json() {
+    myelin::mem_view<Packet> view;
+    Packet p{42, 3.14, "Velocity"};
+    view.serialize(p);
 
+    // Default: string contains { "0" : value, "1" : value ... }
+    std::string json_idx = view.to_json(); 
+
+    // With Names: string contains { "id" : 42, "val" : 3.14 ... }
+    std::array<std::string_view, 3> field_names = {"id", "val", "payload"};
+    std::string json_named = view.to_json(field_names); 
+}
+```
 
 > [!NOTE]
 > ### The "ASan Tax"  
 > Note: Running with **AddressSanitizer** will result in a *~13x* slowdown ($144ns$ vs $11ns$). This is expected due to shadow memory overhead. For production-grade telemetry, always profile on raw silicon.
 
 ## License
-**MIT**. Do whatever you want with it, just don't blame me if your code can't keep up.  
+**Myelin** is dual-licensed to balance open-source growth with intellectual property protection:
+
+1. **Open Source**: Licensed under the **GNU GPL v3**. Anyone is free to use, modify, and share this code, provided that any derivative works or distributions are also made open-source under the same license.
+2. **Commercial/Proprietary**: For entities that wish to integrate Myelin into closed-source or proprietary commercial products without the "copyleft" requirements of the GPL, a **separate commercial license** is required.
+
+For commercial licensing inquiries, please contact me through: **[linkedin](https://www.linkedin.com/in/adam-brazda-617976326/)**
+
 Copyright (c) 2026 Adam Brazda.
