@@ -91,7 +91,7 @@ Most serializers treat data like a tree. Myelin treats it like a **memory bus**.
  
 ## Installation
 Myelin is header-only. Simply copy `myelin.hpp` into your project.
-**Dependencies:** * C++23 (or higher)
+* **Dependencies:** C++23 (or higher)
 * `boost/pfr.hpp` (Minimum 1.2.0)
   
 > [!IMPORTANT]
