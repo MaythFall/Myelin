@@ -9,7 +9,7 @@
 #include <set>
 #include <list>
 #include <deque>
-#include "myelin.hpp"
+#include "myelin/myelin.hpp"
 
 using namespace std;
 using namespace std::chrono;
