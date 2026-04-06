@@ -1,5 +1,5 @@
 # Myelin
-### Sub-12ns(Simple)/Sub-25ns(Complex) serialization for the Axon ecosystem.
+### Sub-12ns(Simple) | Sub-25ns(Complex) serialization for the Axon ecosystem.
 
 **Myelin** is a high-velocity, zero-copy C++23 serialization engine. It wasn't built to be "feature-rich"; it was built to be fast enough that the serializer effectively disappears from your performance profile. By leveraging single-pass packing and compile-time reflection via `boost::pfr`, Myelin achieves mechanical sympathy with modern x86_64 pipelines.
 
@@ -11,14 +11,24 @@ All tests conducted and averaged over 5,000,000 iterations and `-O3` optimizatio
 
 | Operation | Mode | Latency | Throughput | Notes |
 | :--- | :--- | :--- | :--- | :--- |
-| **Scalar Serialize** | `mem_view` | 5.21 $ns$ | 191.94 $Mops/s$ | CPU L1 Cache bound |
-| **Complex Serialize** | `mem_view` | 14.56 $ns$ | 68.68 $Mops/s$ | Incl. strings & vectors |
-| **Field Access** | `mem_view` | 0.65 $ns$ | 1,538.46 $Mops/s$ | Direct L1 cache hit |
-| **JSON Export** | `mem_view` | 630.41 $ns$ | 1.59 $Mops/s$ | `to_chars` optimized |
-| **Scalar Serialize** | `map_view` | 12.04 $ns$ | 83.06 $Mops/s$ | Persistent (Page Cache) |
-| **Complex Serialize** | `map_view` | 22.02 $ns$ | 45.41 $Mops/s$ | Persistent (Page Cache) |
-| **Field Access** | `map_view` | 0.53 $ns$ | 1,886.79 $Mops/s$ | Direct pointer arithmetic |
-| **JSON Export** | `map_view` | 599.81 $ns$ | 1.67 $Mops/s$ | Zero-copy persistence |
+| **Scalar Serialize** | `mem_view` | 5.21 ns | 191.94 Mops/s | CPU L1 Cache bound |
+| **Complex Serialize** | `mem_view` | 14.56 ns | 68.68 Mops/s | Incl. strings & vectors |
+| **Field Access** | `mem_view` | 0.65 ns | 1,538.46 Mops/s | Direct L1 cache hit |
+| **JSON Export** | `mem_view` | 630.41 ns | 1.59 Mops/s | `to_chars` optimized |
+| **Scalar Serialize** | `map_view` | 12.04 ns | 83.06 Mops/s | Persistent (Page Cache) |
+| **Complex Serialize** | `map_view` | 22.02 ns | 45.41 Mops/s | Persistent (Page Cache) |
+| **Field Access** | `map_view` | 0.53 ns | 1,886.79 Mops/s | Direct pointer arithmetic |
+| **JSON Export** | `map_view` | 599.81 ns | 1.67 Mops/s | Zero-copy persistence |
+
+<details>
+<summary><b>Speed Records</b></summary>
+
+- Scalar Serialize: 4.95ns
+- Complex Serialize: 11.96ns
+- Mem Access: 0.51ns
+- JSON Map: 565.21ns
+
+</details>
 
 ### Performance vs. Other C++ Serializers
 
@@ -30,9 +40,9 @@ All tests conducted and averaged over 5,000,000 iterations and `-O3` optimizatio
 
 | Engine | Latency (AVG) | Throughput (AVG) | Efficiency |
 | --- | --- | --- | --- |
-| **Myelin** | **6.44 $ns$** | **155.23 $Mops/s$** | **$1.0x$ (Baseline)** |
-| Protobuf | 25.86 $ns$ | 38.67 $Mops/s$ | $~4.0x$ |
-| FlatBuffers | 64.69 $ns$ | 15.46 $Mops/s$ | $~10.0x$ |
+| **Myelin** | **6.44 ns** | **155.23 Mops/s** | **$1.0x$ (Baseline)** |
+| Protobuf | 25.86 ns | 38.67 Mops/s | $~4.0x$ |
+| FlatBuffers | 64.69 ns | 15.46 Mops/s | $~10.0x$ |
 
 ##### Full Run Series
 
@@ -61,10 +71,10 @@ All tests conducted and averaged over 5,000,000 iterations and `-O3` optimizatio
 
 | Engine | Latency (AVG) | Throughput (AVG) | Efficiency |
 | --- | --- | --- | --- |
-| **Myelin** (Native) | **22.80 $ns$** | **43.86 $Mops/s$** | **$1.0x$ (Baseline)** |
-| **Myelin** (Net) | **22.82 $ns$** | **43.82 $Mops/s$** | **$1.0x$ (Baseline)** |
-| Protobuf | 80.79 $ns$ | 12.38 $Mops/s$ | $~3.5x$ |
-| FlatBuffers | 163.67 $ns$ | 6.11 $Mops/s$ | $~7.2x$ |
+| **Myelin** (Native) | **22.80 ns** | **43.86 Mops/s** | **$1.0x$ (Baseline)** |
+| **Myelin** (Net) | **22.82 ns** | **43.82 Mops/s** | **$1.0x$ (Baseline)** |
+| Protobuf | 80.79 ns | 12.38 Mops/s | $~3.5x$ |
+| FlatBuffers | 163.67 ns | 6.11 Mops/s | $~7.2x$ |
 
 ##### Full Run Series
 
@@ -102,6 +112,13 @@ Myelin is header-only. Simply copy `myelin.hpp` into your project.
 > * **Manual Access**: If you access the underlying `body_ptr` or `mmap` region directly, you must manually reverse the endianness of the elements.
 > * **Strings/Bytes**: Standard `std::string` or `std::vector<uint8_t>` are stored as raw byte-streams and are unaffected by endianness policies.
 
+> [!WARNING]
+> ### Windows Support
+> The Win32 MemoryMapper implementation is architecturally complete but has not yet undergone the same 10M+ iteration stress-testing as the Linux branch.
+> #### Critical Testing Required for:
+> * **Handle Management**: Ensure your environment handles Windows-specific mandatory file locking.
+> * **64KB Granularity**: Verify offset-heavy mappings on your target hardware to prevent alignment faults.
+> * **Performance Jitter**: Profile on raw Windows silicon; MapViewOfFile latency may vary from POSIX mmap under heavy I/O contention.
 
 ### Basic Serialization
 ```cpp
@@ -159,7 +176,7 @@ void save_with_notes() {
     
     // Retrieve attached note
     std::string note = map_view.get_note();
-    view.parse("file.path", note);
+    view.parse("file.path", &note);
 }
 ```
 

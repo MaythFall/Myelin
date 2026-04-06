@@ -33,13 +33,90 @@
 #include <charconv>
 #include "boost/pfr.hpp"
 
-#if defined(__linux__) || defined(__unix__)
-    #include <sys/mman.h>
+#ifdef _WIN32
+    #include <windows.h>
+    #include <io.h>
+#else
     #include <fcntl.h>
+    #include <sys/mman.h>
     #include <unistd.h>
+    #include <cstring>
 #endif
 
 namespace myelin {
+
+    struct MappedRegion {
+        void* addr       = nullptr;
+        void* base       = nullptr;
+        size_t size      = 0;       
+    };
+
+    class MemoryMapper {
+    public:
+        static MappedRegion map(int fd, size_t size, size_t offset = 0) {
+            MappedRegion region;
+
+            #ifdef _WIN32
+                // Windows Finer Touch: 64KB Granularity
+                SYSTEM_INFO si;
+                GetSystemInfo(&si);
+                const size_t align = si.dwAllocationGranularity;
+                
+                const size_t aligned_offset = (offset / align) * align;
+                const size_t diff = offset - aligned_offset;
+                region.size = size + diff;
+
+                HANDLE hFile = reinterpret_cast<HANDLE>(_get_osfhandle(fd));
+                if (hFile == INVALID_HANDLE_VALUE) throw std::runtime_error("Invalid file handle");
+
+                HANDLE hMapping = CreateFileMapping(hFile, nullptr, PAGE_READWRITE, 0, 0, nullptr);
+                if (!hMapping) throw std::runtime_error("CreateFileMapping failed");
+
+                region.base = MapViewOfFile(hMapping, FILE_MAP_ALL_ACCESS, 
+                                        static_cast<DWORD>(aligned_offset >> 32), 
+                                        static_cast<DWORD>(aligned_offset & 0xFFFFFFFF), 
+                                        region.size);
+                CloseHandle(hMapping);
+
+                if (!region.base) throw std::runtime_error("MapViewOfFile failed");
+                region.addr = static_cast<char*>(region.base) + diff;
+
+            #else
+                const size_t align = sysconf(_SC_PAGESIZE);
+                
+                const size_t aligned_offset = (offset / align) * align;
+                const size_t diff = offset - aligned_offset;
+                region.size = size + diff;
+
+                region.base = ::mmap(nullptr, region.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, aligned_offset);
+                
+                if (region.base == MAP_FAILED) {
+                    throw std::runtime_error("mmap failed: " + std::string(strerror(errno)));
+                }
+                madvise(region.base, region.size, MADV_SEQUENTIAL);
+                
+                region.addr = static_cast<char*>(region.base) + diff;
+            #endif
+
+            return region;
+        }
+
+        static void unmap(MappedRegion& region) {
+            if (!region.base) return;
+
+            #ifdef _WIN32
+                if (!UnmapViewOfFile(region.base)) {
+                    throw std::runtime_error("UnmapViewOfFile failed");
+                }
+            #else
+                if (::munmap(region.base, region.size) == -1) {
+                    throw std::runtime_error("munmap failed");
+                }
+            #endif
+            
+            region = {}; // Reset
+        }
+    };
 
     enum class TypeMap : uint8_t {
         U8 = 0x00, U16 = 0x01, U32 = 0x02, U64 = 0x03,
@@ -404,29 +481,54 @@ namespace myelin {
     // --- MAP VIEW ---
     template <typename Derived, endian_policy Policy = endian_policy::native>
     struct map_view : public basic_view<Derived, map_view<Derived, Policy>, Policy> {
-        int fd = -1; void* mmap_base = nullptr; size_t mapped_size = 0;
+        int fd = -1; 
+        MappedRegion region;
 
-        ~map_view() { if (mmap_base) munmap(mmap_base, mapped_size); if (fd != -1) close(fd); }
+        ~map_view() { 
+            MemoryMapper::unmap(region); 
+            if (fd != -1) {
+                #ifdef _WIN32
+                    _close(fd);
+                #else
+                    close(fd);
+                #endif
+            }
+        }
 
         inline void map(const std::string& path) {
-            fd = open(path.c_str(), O_RDWR | O_CREAT, 0644);
-            mapped_size = lseek(fd, 0, SEEK_END);
-            if (mapped_size > 0) {
-                mmap_base = mmap(NULL, mapped_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-                this->header_ptr = (uint8_t*)mmap_base + 4;
-                uint32_t b_sz; std::memcpy(&b_sz, this->header_ptr + this->header_size, 4);
+            #ifdef _WIN32
+                // Windows-specific open with binary flag to prevent newline translation
+                fd = _open(path.c_str(), _O_RDWR | _O_CREAT | _O_BINARY, _S_IREAD | _S_IWRITE);
+                if (fd == -1) throw std::runtime_error("MYELIN: _open failed");
+                size_t file_size = _lseeki64(fd, 0, SEEK_END);
+            #else
+                fd = open(path.c_str(), O_RDWR | O_CREAT, 0644);
+                if (fd == -1) throw std::runtime_error("MYELIN: open failed");
+                size_t file_size = lseek(fd, 0, SEEK_END);
+            #endif
+
+            if (file_size > 0) {
+                region = MemoryMapper::map(fd, file_size, 0);
+                
+                // Offset by 4 bytes to skip the num_fields header
+                this->header_ptr = (uint8_t*)region.addr + 4;
+                
+                uint32_t b_sz; 
+                std::memcpy(&b_sz, this->header_ptr + this->header_size, 4);
                 this->act_size = apply_policy<Policy>(b_sz);
                 this->body_ptr = this->header_ptr + this->header_size + 4;
             }
         }
 
         inline std::string get_note() const {
-            if (!mmap_base || mapped_size < 11) return "";
-            const uint8_t* footer = (uint8_t*)mmap_base + mapped_size - 7;
+            if (!region.addr || region.size < 11) return "";
+            const uint8_t* footer = (uint8_t*)region.addr + region.size - 7;
             if (std::memcmp(footer, "MYELIN_", 7) != 0) return "";
-            uint32_t n_sz; std::memcpy(&n_sz, (uint8_t*)mmap_base + mapped_size - 11, 4);
+            
+            uint32_t n_sz; 
+            std::memcpy(&n_sz, (uint8_t*)region.addr + region.size - 11, 4);
             n_sz = apply_policy<Policy>(n_sz);
-            return std::string((char*)mmap_base + mapped_size - 11 - n_sz, n_sz);
+            return std::string((char*)region.addr + region.size - 11 - n_sz, n_sz);
         }
 
         inline void serialize(const Derived& obj, const std::string& new_note = "") {
@@ -438,13 +540,22 @@ namespace myelin {
             size_t note_total = note.empty() ? 0 : (note.size() + 11);
             size_t total_req = 8 + this->header_size + req_body + note_total;
 
-            if (total_req > mapped_size) {
-                if (mmap_base) munmap(mmap_base, mapped_size);
+            if (total_req > region.size) {
+                MemoryMapper::unmap(region);
+
+            #ifdef _WIN32
+                if (_chsize_s(fd, total_req) != 0) throw std::runtime_error("MYELIN: _chsize_s failed");
+            #else
                 if (ftruncate(fd, total_req) == -1) throw std::runtime_error("MYELIN: ftruncate failed");
-                mmap_base = mmap(NULL, total_req, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-                mapped_size = total_req;
-                uint32_t f = apply_policy<Policy>((uint32_t)this->num_fields); std::memcpy(mmap_base, &f, 4);
-                this->header_ptr = (uint8_t*)mmap_base + 4;
+            #endif
+                
+                region = MemoryMapper::map(fd, total_req, 0);
+                
+                // Re-write the field count header after resizing
+                uint32_t f = apply_policy<Policy>((uint32_t)this->num_fields); 
+                std::memcpy(region.addr, &f, 4);
+                
+                this->header_ptr = (uint8_t*)region.addr + 4;
                 this->body_ptr = this->header_ptr + this->header_size + 4;
             }
 
@@ -454,10 +565,11 @@ namespace myelin {
             std::memcpy(this->header_ptr + this->header_size, &s, 4);
 
             if (!note.empty()) {
-                uint8_t* n_ptr = this->body_ptr + req_body;
+                uint8_t* n_ptr = (uint8_t*)this->body_ptr + req_body;
                 std::memcpy(n_ptr, note.data(), note.size());
-                uint32_t n_sz = apply_policy<Policy>((uint32_t)note.size());
-                std::memcpy(n_ptr + (uint32_t)note.size(), &n_sz, 4);
+                
+                uint32_t n_sz_swapped = apply_policy<Policy>((uint32_t)note.size());
+                std::memcpy(n_ptr + (uint32_t)note.size(), &n_sz_swapped, 4);
                 std::memcpy(n_ptr + (uint32_t)note.size() + 4, "MYELIN_", 7);
             }
         }
