@@ -88,6 +88,7 @@ All tests conducted and averaged over 5,000,000 iterations and `-O3` optimizatio
 | 9 | **6.15** | **24.77** | 64.26 |
 | 10 | 6.72 | 24.97 | 65.28 |
 | 11 | 6.25 | 25.78 | 63.46 |
+
 <small>Units are ns/op</small>
 
 ### 10-Field Struct
