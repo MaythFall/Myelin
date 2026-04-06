@@ -1,4 +1,4 @@
 tests/comparisons
 *.vscode
 exes
-temp
+temp.txt

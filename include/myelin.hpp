@@ -31,6 +31,12 @@
 #include <filesystem>
 #include <stdexcept>
 #include <charconv>
+#include <deque>
+#include <map>
+#include <unordered_map>
+#include <list>
+#include <set>
+#include <unordered_set>
 #include "boost/pfr.hpp"
 
 #ifdef _WIN32
@@ -118,11 +124,57 @@ namespace myelin {
         }
     };
 
+    template <typename K, typename V, bool Ordered = true>
+    class std_map_view {
+        std::span<const K> _keys;
+        std::span<const V> _values;
+
+    public:
+        void set_views(std::span<const K> ks, std::span<const V> vs) {
+            _keys = ks;
+            _values = vs;
+        }
+
+        inline const V* find(const K& key) const {
+            if constexpr (Ordered) {
+                auto it = std::lower_bound(_keys.begin(), _keys.end(), key);
+                if (it != _keys.end() && *it == key) {
+                    return &_values[std::distance(_keys.begin(), it)];
+                }
+                return nullptr;
+            } else {
+                for (auto it = _keys.begin(); it != _keys.end(); ++it) {
+                    if (*it == key) {
+                        return &_values[std::distance(_keys.begin(), it)];
+                    }
+                }
+                return nullptr;
+            }
+        }
+    };
+
+    template <typename K, bool Ordered = true>
+    class std_set_view {
+        std::span<const K> _keys;
+    public:
+        void set_view(std::span<const K> ks) { _keys = ks; }
+        
+        inline bool contains(const K& key) const {
+            if constexpr (Ordered) {
+                return std::binary_search(_keys.begin(), _keys.end(), key);
+            } else {
+                for (const auto& k : _keys) if (k == key) return true;
+                return false;
+            }
+        }
+        inline std::span<const K> data() const { return _keys; }
+    };
+
     enum class TypeMap : uint8_t {
         U8 = 0x00, U16 = 0x01, U32 = 0x02, U64 = 0x03,
         CHAR = 0x04, BOOL = 0x05, FLOAT = 0x06, DOUBLE = 0x07,
         I8 = 0x0A, I16 = 0x0B, I32 = 0x0C, I64 = 0x0D,
-        STR = 0x0F, VEC = 0x20, ARR = 0x10, SPAN = 0x30
+        STR = 0x0F, VEC = 0x20, ARR = 0x10, SPAN = 0x30, MAP = 0x40, DEQ = 0x50, LIST = 0x60, SET = 0x70
     };
 
     enum class endian_policy {
@@ -148,6 +200,9 @@ namespace myelin {
     template <typename T>
     inline constexpr bool is_noncontinuous_range_v = !std::ranges::contiguous_range<T> && !std::is_scalar_v<T>;
 
+    template <typename T>
+    inline constexpr bool is_range_v = is_continuous_v<T> || is_noncontinuous_range_v<T>;
+
     template <typename T> struct is_vector : std::false_type {};
     template <typename T, typename Alloc> 
     struct is_vector<std::vector<T, Alloc>> : std::true_type {};
@@ -160,8 +215,171 @@ namespace myelin {
     template <typename T> 
     inline constexpr bool is_std_array_v = is_std_array<std::remove_cvref_t<T>>::value;
 
+    template <typename T> struct is_map : std::false_type {};
+    template <typename K, typename V, typename C, typename A>
+    struct is_map<std::map<K, V, C, A>> : std::true_type {};
+
+    template <typename T> struct is_unordered_map : std::false_type {};
+    template <typename K, typename V, typename H, typename P, typename A>
+    struct is_unordered_map<std::unordered_map<K, V, H, P, A>> : std::true_type {};
+
+    template <typename T> struct is_list : std::false_type {};
+    template <typename T, typename Alloc> 
+    struct is_list<std::list<T, Alloc>> : std::true_type {};
+    template <typename T> 
+    inline constexpr bool is_list_v = is_list<std::remove_cvref_t<T>>::value;
+
+    template <typename T> struct is_deque : std::false_type {};
+    template <typename T, typename Alloc> 
+    struct is_deque<std::deque<T, Alloc>> : std::true_type {};
+    template <typename T> 
+    inline constexpr bool is_deque_v = is_deque<std::remove_cvref_t<T>>::value;
+
+    template <typename T>
+    inline constexpr bool is_map_type_v = 
+        is_map<std::remove_cvref_t<T>>::value || 
+        is_unordered_map<std::remove_cvref_t<T>>::value;
+
+    template <typename T> struct is_set : std::false_type {};
+    template <typename K, typename C, typename A>
+    struct is_set<std::set<K, C, A>> : std::true_type {};
+
+    template <typename T> struct is_unordered_set : std::false_type {};
+    template <typename K, typename H, typename P, typename A>
+    struct is_unordered_set<std::unordered_set<K, H, P, A>> : std::true_type {};
+
+    template <typename T>
+    inline constexpr bool is_set_type_v = 
+        is_set<std::remove_cvref_t<T>>::value || 
+        is_unordered_set<std::remove_cvref_t<T>>::value;
+
     inline size_t align_to(size_t offset, size_t a) {
         return (a == 0) ? offset : (offset + (a - 1)) & ~(a - 1);
+    }
+
+    template <typename T>
+    inline void flatten(const T& data, std::vector<std::ranges::range_value_t<T>>& out) {
+        static_assert(is_noncontinuous_range_v<T>, "Range must be non-continuous");
+
+        if constexpr (std::ranges::sized_range<T>) {
+            out.reserve(out.size() + std::ranges::size(data));
+        }
+        
+        out.insert(out.end(), std::ranges::begin(data), std::ranges::end(data));
+    }
+
+    // Allocate a map for the serialized map object
+    template <typename T, typename M>
+    inline void mapify(const T& data, M& out) {
+        static_assert(is_continuous_v<T>, "Source must be continuous");
+        static_assert(is_map_type_v<M>, "Output must be a map");
+        
+        using Pair = std::ranges::range_value_t<M>;
+        using K = std::remove_const_t<std::tuple_element_t<0, Pair>>;
+        using V = std::tuple_element_t<1, Pair>;
+
+        uint32_t map_size = *reinterpret_cast<const uint32_t*>(data.data());
+        //out.reserve(map_size);
+
+        const uint8_t* key_start = data.data() + 4;
+        const uint8_t* val_start = key_start + (map_size * sizeof(K));
+
+        std::span<const K> keys(reinterpret_cast<const K*>(key_start), map_size);
+        std::span<const V> values(reinterpret_cast<const V*>(val_start), map_size);
+
+        for (size_t i = 0; i < map_size; ++i) {
+            out.emplace(keys[i], values[i]);
+        }
+    }
+
+    // Read-only reference "map" object: DO NOT USE FOR unordered_maps with REPEATING KEYS
+    // K = Key Type, V = Value Type, T = Map type Ordered = map vs unordered_map
+    template <typename K, typename V, typename T, bool Ordered = true>
+    inline void mapify(const T& data, myelin::std_map_view<K, V, Ordered>& out) {
+        static_assert(is_continuous_v<T>, "Source buffer must be contiguous (Mmap/Vector)");
+        
+        uint32_t map_size = *reinterpret_cast<const uint32_t*>(data.data());
+        
+        const uint8_t* key_start = data.data() + 4;
+        const uint8_t* val_start = key_start + (map_size * sizeof(K));
+
+        out.set_views(
+            std::span<const K>(reinterpret_cast<const K*>(key_start), map_size),
+            std::span<const V>(reinterpret_cast<const V*>(val_start), map_size)
+        );
+    }
+
+    template <typename K, typename T, bool Ordered = true>
+    inline void setify(const T& data, myelin::std_set_view<K, Ordered>& out) {
+        static_assert(is_continuous_v<T>, "Source must be continuous");
+        uint32_t set_size = *reinterpret_cast<const uint32_t*>(data.data());
+        out.set_view(std::span<const K>(reinterpret_cast<const K*>(data.data() + 4), set_size));
+    }
+
+    template <typename T>
+    inline constexpr T flipEndianness(const T& val) {
+        if constexpr (sizeof(T) <= 1) return val;
+        if constexpr (std::is_integral_v<T>) {
+            return std::byteswap(val);
+        } else if constexpr (std::is_floating_point_v<T>) {
+            if constexpr (sizeof(T) == 4) {
+                return std::bit_cast<T>(std::byteswap(std::bit_cast<uint32_t>(val)));
+            } else if constexpr (sizeof(T) == 8) {
+                return std::bit_cast<T>(std::byteswap(std::bit_cast<uint64_t>(val)));
+            }
+        }
+        return val;
+    }
+
+
+    template <typename T, endian_policy Policy = endian_policy::native>
+    inline void flatten_map(const T& data, std::vector<uint8_t>& out) {
+        using Pair = std::ranges::range_value_t<T>;
+        using K = std::remove_const_t<std::tuple_element_t<0, Pair>>;
+        using V = std::tuple_element_t<1, Pair>;
+        static_assert(std::is_trivially_copyable_v<K> && std::is_trivially_copyable_v<V>, "Keys and Values must be copyable");
+
+        uint32_t map_size = static_cast<uint32_t>(data.size());
+        size_t total_bytes = 4 + (map_size * (sizeof(K) + sizeof(V)));
+        
+        out.resize(total_bytes);
+        uint8_t* ptr = out.data();
+
+        *reinterpret_cast<uint32_t*>(ptr) = map_size;
+        
+        K* key_ptr = reinterpret_cast<K*>(ptr + 4);
+        V* val_ptr = reinterpret_cast<V*>(ptr + 4 + (map_size * sizeof(K)));
+
+        size_t i = 0;
+        for (const auto& [k, v] : data) {
+            if constexpr (Policy == endian_policy::network) {
+                key_ptr[i] = flipEndianness<K>(k);
+                val_ptr[i] = flipEndianness<V>(v);
+                ++i;
+            } else {
+                key_ptr[i] = k;
+                val_ptr[i] = v;
+                ++i;
+            }
+        }
+    }
+
+    template <typename T, endian_policy Policy = endian_policy::native>
+    inline void flatten_set(const T& data, std::vector<uint8_t>& out) {
+        using K = std::remove_const_t<typename T::value_type>;
+        static_assert(std::is_trivially_copyable_v<K>, "Set keys must be copyable");
+
+        uint32_t set_size = static_cast<uint32_t>(data.size());
+        size_t total_bytes = 4 + (set_size * sizeof(K));
+        
+        out.resize(total_bytes);
+        *reinterpret_cast<uint32_t*>(out.data()) = set_size;
+        
+        K* key_ptr = reinterpret_cast<K*>(out.data() + 4);
+        size_t i = 0;
+        for (const auto& k : data) {
+            key_ptr[i++] = (Policy == endian_policy::network) ? flipEndianness<K>(k) : k;
+        }
     }
 
     // Helper to conditionally swap bytes based on policy
@@ -190,16 +408,29 @@ namespace myelin {
         if constexpr (is_string_type_v<U>) return TypeMap::STR;
 
         if constexpr (is_continuous_v<U>) {
-            constexpr uint8_t inner_tag = (uint8_t)get_type_tag<std::ranges::range_value_t<U>>();
+            constexpr uint8_t inner = (uint8_t)get_type_tag<std::ranges::range_value_t<U>>();
             
             if constexpr (std::is_array_v<U> || is_std_array_v<U>) {
-                return static_cast<TypeMap>((uint8_t)TypeMap::ARR | inner_tag);
+                return static_cast<TypeMap>((uint8_t)TypeMap::ARR | inner);
             } else if constexpr (is_vector_v<U>) {
-                return static_cast<TypeMap>((uint8_t)TypeMap::VEC | inner_tag);
+                return static_cast<TypeMap>((uint8_t)TypeMap::VEC | inner);
             } else {
-                return static_cast<TypeMap>((uint8_t)TypeMap::SPAN | inner_tag);
+                return static_cast<TypeMap>((uint8_t)TypeMap::SPAN | inner);
             }
         }
+
+        if constexpr (is_list_v<U>) {
+            constexpr uint8_t inner = (uint8_t)get_type_tag<std::ranges::range_value_t<U>>();
+            return static_cast<TypeMap>((uint8_t)TypeMap::LIST | inner);
+        }
+        
+        if constexpr (is_deque_v<U>) {
+            constexpr uint8_t inner = (uint8_t)get_type_tag<std::ranges::range_value_t<U>>();
+            return static_cast<TypeMap>((uint8_t)TypeMap::DEQ | inner);
+        }
+
+        if constexpr (is_map_type_v<U>) return TypeMap::MAP;
+        if constexpr (is_set_type_v<U>) return TypeMap::SET;
 
         if constexpr (std::is_same_v<U, uint64_t>) return TypeMap::U64;
         if constexpr (std::is_same_v<U, int64_t>)  return TypeMap::I64;
@@ -306,7 +537,7 @@ namespace myelin {
                 using T = std::decay_t<decltype(field)>;
                 this->header_ptr[idx * 5] = (uint8_t)get_type_tag<T>();
 
-                if constexpr (!is_continuous_v<T>) {
+                if constexpr (!is_range_v<T>) {
                     constexpr size_t a = alignof(T);
                     uint32_t write_off = 0;
                     if      constexpr (a >= 8) write_off = cursors[0], cursors[0] += 8;
@@ -319,7 +550,7 @@ namespace myelin {
 
                     T final_val = apply_policy<Policy>(field);
                     std::memcpy(this->body_ptr + write_off, &final_val, sizeof(T));
-                } else {
+                } else if constexpr (is_continuous_v<T>) {
                     blob_cursor = align_to(blob_cursor, 4);
                     uint32_t write_off = (uint32_t)blob_cursor;
                     using E = std::ranges::range_value_t<T>;
@@ -341,6 +572,66 @@ namespace myelin {
                         std::span<E> dest_span((E*)(this->body_ptr + d_start), d_sz / sizeof(E));
                         flipEndiannessBlob(dest_span);
                     }
+                } else if constexpr (is_map_type_v<T>) {
+                    std::vector<uint8_t> flattened;
+                    flatten_map<T>(field, flattened);
+                    blob_cursor = align_to(blob_cursor, 4);
+                    uint32_t write_off = (uint32_t)blob_cursor;
+
+                    uint32_t d_sz = (uint32_t)(std::ranges::size(flattened));
+                    
+                    uint32_t le_off = apply_policy<Policy>(write_off);
+                    std::memcpy(&this->header_ptr[idx * 5 + 1], &le_off, 4);
+                    
+                    uint32_t le_sz = apply_policy<Policy>(d_sz);
+                    std::memcpy(this->body_ptr + write_off, &le_sz, 4);
+                    
+                    size_t d_start = align_to(write_off + 4, alignof(uint32_t)); //align for map_size
+                    
+                    std::memcpy(this->body_ptr + d_start, std::ranges::data(flattened), d_sz);
+                    blob_cursor = d_start + d_sz;
+                } else if constexpr (is_set_type_v<T>) {
+                    std::vector<uint8_t> flattened;
+                    flatten_set<T, Policy>(field, flattened);
+                    blob_cursor = align_to(blob_cursor, 4);
+                    uint32_t write_off = (uint32_t)blob_cursor;
+                    uint32_t d_sz = (uint32_t)flattened.size();
+
+                    uint32_t le_off = apply_policy<Policy>(write_off);
+                    std::memcpy(&this->header_ptr[idx * 5 + 1], &le_off, 4);
+                    
+                    uint32_t le_sz = apply_policy<Policy>(d_sz);
+                    std::memcpy(this->body_ptr + write_off, &le_sz, 4);
+                    
+                    size_t d_start = align_to(write_off + 4, 4); 
+                    std::memcpy(this->body_ptr + d_start, flattened.data(), d_sz);
+                    blob_cursor = d_start + d_sz;
+                } else {
+                    using E = std::ranges::range_value_t<T>;
+                    std::vector<E> flattened;
+                    flatten<T>(field, flattened);
+
+                    blob_cursor = align_to(blob_cursor, 4);
+                    uint32_t write_off = (uint32_t)blob_cursor;
+
+                    uint32_t d_sz = (uint32_t)(std::ranges::size(flattened) * sizeof(E));
+                    
+                    uint32_t le_off = apply_policy<Policy>(write_off);
+                    std::memcpy(&this->header_ptr[idx * 5 + 1], &le_off, 4);
+                    
+                    uint32_t le_sz = apply_policy<Policy>(d_sz);
+                    std::memcpy(this->body_ptr + write_off, &le_sz, 4);
+                    
+                    size_t d_start = align_to(write_off + 4, alignof(E));
+                    
+                    std::memcpy(this->body_ptr + d_start, std::ranges::data(flattened), d_sz);
+                    blob_cursor = d_start + d_sz;
+    
+                    // Only pay the loop tax if we are actually on a Network Policy
+                    if constexpr (Policy == endian_policy::network) {
+                        std::span<E> dest_span((E*)(this->body_ptr + d_start), d_sz / sizeof(E));
+                        flipEndiannessBlob(dest_span);
+                    }
                 }
             });
             return blob_cursor;
@@ -352,14 +643,20 @@ namespace myelin {
             uint32_t b_off; std::memcpy(&b_off, &header_ptr[N * 5 + 1], 4);
             b_off = apply_policy<Policy>(b_off);
 
-            if constexpr (is_continuous_v<T>) {
+            if constexpr (is_map_type_v<T> || is_set_type_v<T>) {
+                uint32_t sz; std::memcpy(&sz, body_ptr + b_off, 4);
+                sz = apply_policy<Policy>(sz);
+                using E = std::ranges::range_value_t<T>;
+                size_t start = align_to(b_off + 4, alignof(uint32_t));
+                return std::span<uint8_t>((uint8_t*)(body_ptr + start), sz);
+            } else if constexpr (is_range_v<T>) {
                 uint32_t sz; std::memcpy(&sz, body_ptr + b_off, 4);
                 sz = apply_policy<Policy>(sz);
                 using E = std::ranges::range_value_t<T>;
                 size_t start = align_to(b_off + 4, alignof(E));
                 if constexpr (is_string_type_v<T>) return std::string_view((char*)(body_ptr + start), sz);
                 else return std::span<E>((E*)(body_ptr + start), sz / sizeof(E));
-            } else { 
+            } else {
                 T val = *(T*)(body_ptr + b_off);
                 return apply_policy<Policy>(val);
             }
