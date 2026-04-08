@@ -62,6 +62,9 @@ namespace myelin {
     inline constexpr bool is_noncontinuous_range_v = !std::ranges::contiguous_range<T> && !std::is_scalar_v<T>;
 
     template <typename T>
+    inline constexpr bool is_struct_v = std::is_class_v<T> && std::is_aggregate_v<T>;
+
+    template <typename T>
     inline constexpr bool is_range_v = is_continuous_v<T> || is_noncontinuous_range_v<T>;
 
     template <typename T> struct is_vector : std::false_type {};

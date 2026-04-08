@@ -3,6 +3,9 @@
 
 namespace myelin {
 
+    template <typename Derived, endian_policy Policy>
+    struct recur_view;
+
     template <typename Derived, typename Impl, endian_policy Policy = endian_policy::native>
     struct basic_view {
         static constexpr uint32_t num_fields = boost::pfr::tuple_size_v<Derived>;
@@ -12,20 +15,29 @@ namespace myelin {
         uint8_t* body_ptr = nullptr;
         size_t   act_size = 0;
 
-        inline size_t resize_calc(const Derived& obj, uint8_t* counts) const {
+        size_t nest_idx = 0;
+        std::vector<myelin::recur_data> nested;
+
+        inline size_t resize_calc(const Derived& obj, uint8_t* counts) {
             size_t req = 0;
             boost::pfr::for_each_field(obj, [&](const auto& field) {
                 using T = std::decay_t<decltype(field)>;
                 if constexpr (is_continuous_v<T>) {
                     ++counts[4];
-                    req += (std::ranges::size(field) * sizeof(std::ranges::range_value_t<T>)) + 11;
+                    // +16 bytes for 4-byte size header and alignment padding
+                    req += (std::ranges::size(field) * sizeof(std::ranges::range_value_t<T>)) + 11; 
+                } else if constexpr (is_struct_v<T>) {
+                    ++counts[4];
+                    nested.push_back(myelin::recur_data());
+                    // FIX: Add +16 padding allowance for struct alignment!
+                    req += recur_view<T, Policy>().size(field, nested.back()) + 11; 
                 } else if constexpr (is_noncontinuous_range_v<T>) {
                     ++counts[4];
                     if constexpr (is_map_type_v<T>) {
                         using Pair = std::ranges::range_value_t<T>;
                         using K = std::remove_const_t<std::tuple_element_t<0, Pair>>;
                         using V = std::tuple_element_t<1, Pair>;
-                        req += (std::ranges::size(field) * sizeof(K) + std::ranges::size(field) * sizeof(V)) + 11;
+                        req += (std::ranges::size(field) * (sizeof(K) + sizeof(V))) + 11;
                     } else {
                         req += (std::ranges::size(field) * sizeof(std::ranges::range_value_t<T>)) + 11;
                     }
@@ -33,7 +45,8 @@ namespace myelin {
                     constexpr size_t a = alignof(T);
                     if (a >= 8) ++counts[0]; else if (a == 4) ++counts[1];
                     else if (a == 2) ++counts[2]; else ++counts[3];
-                    req += sizeof(T);
+                    // Scalars are packed perfectly by the bucket sort, no dynamic padding needed
+                    req += sizeof(T); 
                 }
             });
             return req;
@@ -51,19 +64,21 @@ namespace myelin {
                 using T = std::decay_t<decltype(field)>;
                 this->header_ptr[idx * 5] = (uint8_t)get_type_tag<T>();
 
-                if constexpr (!is_range_v<T>) {
-                    constexpr size_t a = alignof(T);
-                    uint32_t write_off = 0;
-                    if      constexpr (a >= 8) write_off = cursors[0], cursors[0] += 8;
-                    else if constexpr (a == 4) write_off = cursors[1], cursors[1] += 4;
-                    else if constexpr (a == 2) write_off = cursors[2], cursors[2] += 2;
-                    else                       write_off = cursors[3], cursors[3] += 1;
+                if constexpr (is_struct_v<T>) {
+                    blob_cursor = align_to(blob_cursor, 4);
+                    uint32_t write_off = (uint32_t)blob_cursor;
+                    uint32_t d_sz = (uint32_t)(nested[nest_idx].header_size + nested[nest_idx].body_size);
 
                     uint32_t le_off = apply_policy<Policy>(write_off);
                     std::memcpy(&this->header_ptr[idx * 5 + 1], &le_off, 4);
+                    
+                    uint32_t le_sz = apply_policy<Policy>(d_sz);
+                    std::memcpy(this->body_ptr + write_off, &le_sz, 4);
+                    
+                    size_t d_start = write_off + 4;
+                    recur_view<T, Policy>().serialize(field, nested[nest_idx++], this->body_ptr + d_start);
+                    blob_cursor = d_start + d_sz;
 
-                    T final_val = apply_policy<Policy>(field);
-                    std::memcpy(this->body_ptr + write_off, &final_val, sizeof(T));
                 } else if constexpr (is_continuous_v<T>) {
                     blob_cursor = align_to(blob_cursor, 4);
                     uint32_t write_off = (uint32_t)blob_cursor;
@@ -72,12 +87,10 @@ namespace myelin {
                     
                     uint32_t le_off = apply_policy<Policy>(write_off);
                     std::memcpy(&this->header_ptr[idx * 5 + 1], &le_off, 4);
-                    
                     uint32_t le_sz = apply_policy<Policy>(d_sz);
                     std::memcpy(this->body_ptr + write_off, &le_sz, 4);
                     
                     size_t d_start = align_to(write_off + 4, alignof(E));
-                    
                     std::memcpy(this->body_ptr + d_start, std::ranges::data(field), d_sz);
                     blob_cursor = d_start + d_sz;
     
@@ -85,6 +98,7 @@ namespace myelin {
                         std::span<E> dest_span((E*)(this->body_ptr + d_start), d_sz / sizeof(E));
                         flipEndiannessBlob(dest_span);
                     }
+
                 } else if constexpr (is_map_type_v<T>) {
                     using Pair = std::ranges::range_value_t<T>;
                     using K = std::remove_const_t<std::tuple_element_t<0, Pair>>;
@@ -100,9 +114,9 @@ namespace myelin {
                     uint32_t le_sz = apply_policy<Policy>(d_sz);
                     std::memcpy(this->body_ptr + write_off, &le_sz, 4);
 
-                    std::span<uint8_t> target(this->body_ptr + write_off+4, d_sz);
+                    std::span<uint8_t> target(this->body_ptr + write_off + 4, d_sz);
                     flatten_map<T, Policy>(field, target);
-                    blob_cursor = write_off + d_sz;
+                    blob_cursor = write_off + 4 + d_sz; 
 
                 } else if constexpr (is_set_type_v<T>) {
                     using K = std::remove_const_t<typename T::value_type>;
@@ -118,9 +132,9 @@ namespace myelin {
 
                     std::span<uint8_t> target(this->body_ptr + write_off + 4, d_sz);
                     flatten_set<T, Policy>(field, target);
-                    blob_cursor = write_off + d_sz;
+                    blob_cursor = write_off + 4 + d_sz;
 
-                } else {
+                } else if constexpr (is_noncontinuous_range_v<T>) {
                     using E = std::ranges::range_value_t<T>;
                     blob_cursor = align_to(blob_cursor, 4);
                     uint32_t write_off = (uint32_t)blob_cursor;
@@ -135,13 +149,26 @@ namespace myelin {
                     size_t d_start = align_to(write_off + 4, alignof(E));
                     std::span<E> target((E*)(this->body_ptr + d_start), data_len);
                     flatten<T>(field, target);
-
                     blob_cursor = d_start + d_sz;
 
                     if constexpr (Policy == endian_policy::network) {
                         std::span<E> dest_span((E*)(this->body_ptr + d_start), data_len);
                         flipEndiannessBlob(dest_span);
                     }
+                } else {
+                    // SCALARS FINALLY AT THE BOTTOM!
+                    constexpr size_t a = alignof(T);
+                    uint32_t write_off = 0;
+                    if      constexpr (a >= 8) write_off = cursors[0], cursors[0] += 8;
+                    else if constexpr (a == 4) write_off = cursors[1], cursors[1] += 4;
+                    else if constexpr (a == 2) write_off = cursors[2], cursors[2] += 2;
+                    else                       write_off = cursors[3], cursors[3] += 1;
+
+                    uint32_t le_off = apply_policy<Policy>(write_off);
+                    std::memcpy(&this->header_ptr[idx * 5 + 1], &le_off, 4);
+
+                    T final_val = apply_policy<Policy>(field);
+                    std::memcpy(this->body_ptr + write_off, &final_val, sizeof(T));
                 }
             });
             return blob_cursor;
@@ -153,10 +180,13 @@ namespace myelin {
             uint32_t b_off; std::memcpy(&b_off, &header_ptr[N * 5 + 1], 4);
             b_off = apply_policy<Policy>(b_off);
 
-            if constexpr (is_map_type_v<T> || is_set_type_v<T>) {
+            if constexpr (is_struct_v<T>) {
                 uint32_t sz; std::memcpy(&sz, body_ptr + b_off, 4);
                 sz = apply_policy<Policy>(sz);
-                using E = std::ranges::range_value_t<T>;
+                return std::span<uint8_t>((uint8_t*)(body_ptr + b_off + 4), sz);
+            } else if constexpr (is_map_type_v<T> || is_set_type_v<T>) {
+                uint32_t sz; std::memcpy(&sz, body_ptr + b_off, 4);
+                sz = apply_policy<Policy>(sz);
                 size_t start = align_to(b_off + 4, alignof(uint32_t));
                 return std::span<uint8_t>((uint8_t*)(body_ptr + start), sz);
             } else if constexpr (is_range_v<T>) {
@@ -173,46 +203,7 @@ namespace myelin {
         }
 
         inline std::string to_json() const {
-            std::string output;
-            output.reserve((act_size << 1) + (num_fields << 3));
-            output += "[\n";
-            size_t current = 0;
-            boost::pfr::for_each_field(Derived{}, [&](const auto& dummy) {
-                using T = std::decay_t<decltype(dummy)>;
-                
-                uint32_t b_off; 
-                std::memcpy(&b_off, &this->header_ptr[current * 5 + 1], 4);
-                b_off = apply_policy<Policy>(b_off);
-
-                output += "   { \"" + myelin::to_string(current) + "\" : ";
-
-                if constexpr (is_continuous_v<T>) {
-                    uint32_t sz; 
-                    std::memcpy(&sz, this->body_ptr + b_off, 4);
-                    sz = apply_policy<Policy>(sz);
-
-                    using E = std::ranges::range_value_t<T>;
-                    size_t st = align_to(b_off + 4, alignof(E));
-
-                    if constexpr (is_string_type_v<T>) {
-                        output += "\"" + std::string((char*)(this->body_ptr + st), sz) + "\"";
-                    } else {
-                        output += dumpBlob<std::span<E>, Policy>(std::span<E>((E*)(this->body_ptr + st), sz / sizeof(E)));
-                    }
-                } else {
-                    T val = *(T*)(this->body_ptr + b_off);
-                    val = apply_policy<Policy>(val);
-
-                    if constexpr (std::is_same_v<T, bool>) output += (val ? "true" : "false");
-                    else if constexpr (std::is_integral_v<T> && sizeof(T) == 1) output += myelin::to_string((int)val);
-                    else output += myelin::to_string(val);
-                }
-
-                output += (current < num_fields - 1) ? " },\n" : " }\n";
-                current++;
-            });
-            output += "]";
-            return output;
+            return to_json({});
         }
 
         inline std::string to_json(const std::array<std::string_view, num_fields>& field_names) const {
@@ -230,7 +221,36 @@ namespace myelin {
                 std::string key = field_names[current].empty() ? myelin::to_string(current) : std::string(field_names[current]);
                 output += "   { \"" + key + "\" : ";
 
-                if constexpr (is_continuous_v<T>) {
+                if constexpr (is_struct_v<T>) {
+                    uint32_t sz; 
+                    std::memcpy(&sz, this->body_ptr + b_off, 4);
+                    sz = apply_policy<Policy>(sz);
+                    
+                    auto child_span = std::span<const uint8_t>((const uint8_t*)(this->body_ptr + b_off + 4), sz);
+                    nested_view<T, Policy> t;
+                    myelin::structify<T, Policy>(child_span, t);
+                    output += t.to_json();
+                } else if constexpr (is_map_type_v<T>) {
+                    using Pair = std::ranges::range_value_t<T>;
+                    using K = std::remove_const_t<std::tuple_element_t<0, Pair>>;
+                    using V = std::tuple_element_t<1, Pair>;
+                    
+                    uint32_t sz; 
+                    std::memcpy(&sz, this->body_ptr + b_off, 4);
+                    sz = apply_policy<Policy>(sz);
+                    
+                    std_map_view<K, V> map;
+                    myelin::mapify(std::span<const uint8_t>((const uint8_t*)(this->body_ptr + b_off + 4), sz), map);
+                    
+                    output += "{ ";
+                    for (size_t i = 0; i < map.size(); ++i) {
+                        auto p = map.pair_at(i);
+                        // JSON strictly requires keys to be strings
+                        output += "\"" + myelin::to_string(std::get<0>(p)) + "\": " + myelin::to_string(std::get<1>(p));
+                        if (i != map.size() - 1) output += ", ";
+                    }
+                    output += " }";
+                } else if constexpr (is_range_v<T>) {
                     uint32_t sz; 
                     std::memcpy(&sz, this->body_ptr + b_off, 4);
                     sz = apply_policy<Policy>(sz);
@@ -243,9 +263,10 @@ namespace myelin {
                     } else {
                         output += dumpBlob<std::span<E>, Policy>(std::span<E>((E*)(this->body_ptr + st), sz / sizeof(E)));
                     }
-                } else {
-                    T val = *(T*)(this->body_ptr + b_off);
-                    val = apply_policy<Policy>(val); // Policy swap on the actual data
+                } else if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T> || std::is_same_v<T, bool>) {
+                    T val;
+                    std::memcpy(&val, this->body_ptr + b_off, sizeof(T));
+                    val = apply_policy<Policy>(val); 
                     
                     if constexpr (std::is_same_v<T, bool>) {
                         output += (val ? "true" : "false");
@@ -254,6 +275,8 @@ namespace myelin {
                     } else {
                         output += myelin::to_string(val);
                     }
+                } else {
+                    output += "\"[Unsupported JSON Type]\"";
                 }
 
                 output += (current < num_fields - 1) ? " },\n" : " }\n";
@@ -263,6 +286,31 @@ namespace myelin {
             output += "]";
             output.resize(output.size());
             return output;
+        }
+
+    };
+
+
+    template <typename Derived, endian_policy Policy = endian_policy::native>
+    struct recur_view : public basic_view<Derived, recur_view<Derived, Policy>, Policy> {
+
+        static inline size_t size(const Derived& obj, myelin::recur_data& store) {
+            basic_view<Derived, myelin::recur_view<Derived, Policy>, Policy> temp;
+            
+            store.body_size = temp.resize_calc(obj, store.count);
+            store.nested = std::move(temp.nested);
+            
+            for (auto &i : store.count) store.header_size += i;
+            return store.body_size + (store.header_size *= 5);
+        }
+
+        inline void serialize(const Derived& obj, const myelin::recur_data& data, uint8_t* dest) {
+            this->header_ptr = dest;
+            this->body_ptr = dest + this->header_size;
+            
+            this->nested = data.nested;
+            
+            this->act_size = this->pack_data_bucketed(obj, (uint8_t*)(data.count));
         }
 
     };
