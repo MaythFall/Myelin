@@ -135,6 +135,30 @@ Myelin solves this by **flattening** these structures into a contiguous **SoA (S
 
 This allows the CPU prefetcher to stream data into the L1 cache with zero pointer-chasing, achieving **~3.9ns** lookup times even for associative data.
 
+### Zero-Cost Multidimensional Arrays & Nesting
+Unlike traditional serializers that iterate through nested loops or recursion to pack arrays of arrays, Myelin treats statically-sized nested `std::array` types as a single contiguous memory block.
+
+* **Matrix Optimization**: A `std::array<std::array<float, 4>, 4>` is detected at compile-time and serialized via a single monolithic `memcpy`.
+* **Sub-Nanosecond Access**: Because the layout is guaranteed contiguous, accessing `view.get_field<N>()[i][j]` results in raw pointer arithmetic that the compiler typically inlines into a single scale-index-base instruction.
+* **Recursive Safety**: Statically defined nested structs are unrolled during the metadata pass, ensuring that even deep hierarchies maintain sub-25ns serialization latency.
+
+> [!NOTE]
+> Only statically defined lengths are supported for nested flattening. Dynamically nested `std::vector<std::vector<T>>` will not trigger the contiguous optimization path.
+
+#### Nested Structs
+Myelin supports nesting structs within other structs, as well as placing fixed-size structs inside vectors or arrays. To maintain zero-copy safety while accessing deep members, use the `structify<T>` function to wrap the raw blob in a `nested_view<T>`.
+
+```cpp
+// Example: Accessing a nested 'Weapon' struct inside a 'Monster'
+auto weapon_blob = monster_view.get_field<7>();
+myelin::nested_view<Weapon> weapon_view;
+myelin::structify<Weapon>(weapon_blob, weapon_view);
+
+auto damage = weapon_view.get_field<1>();
+```
+
+> [!NOTE]
+> ***Optimization Roadmap***: While fixed-size nested structs are highly performant, deep recursion currently adds metadata overhead. Strategies for "Recursive Flattening" are currently being profiled for the v1.2 release.
 ---
  
 ## Installation
