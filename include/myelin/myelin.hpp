@@ -59,15 +59,32 @@ namespace myelin {
 
     template <typename T>
     inline constexpr bool is_string_type_v = std::is_same_v<std::decay_t<T>, std::string> || std::is_same_v<std::decay_t<T>, std::string_view>;
+
+    template <typename T>
+    struct is_flat_array : std::false_type {
+        // Inherits operator bool() from std::false_type (returns false)
+    };
+
+    template <typename T, std::size_t N>
+    struct is_flat_array<std::array<T, N>> : 
+        std::bool_constant<std::is_arithmetic_v<T> || is_flat_array<T>::value> 
+    {};
     
     template <typename T>
-    inline constexpr bool is_continuous_v = std::ranges::contiguous_range<T> && !std::is_array_v<std::decay_t<T>>;
+    struct flat_array_count : std::integral_constant<size_t, 1> {};
+
+    template <typename T, std::size_t N>
+    struct flat_array_count<std::array<T, N>> : 
+        std::integral_constant<size_t, N * flat_array_count<T>::value> {};
+
+    template <typename T>
+    inline constexpr bool is_continuous_v = (std::ranges::contiguous_range<T> || is_flat_array<T>{}) && !std::is_array_v<std::decay_t<T>>;
 
     template <typename T>
     inline constexpr bool is_noncontinuous_range_v = !std::ranges::contiguous_range<T> && !std::is_scalar_v<T>;
 
     template <typename T>
-    inline constexpr bool is_struct_v = std::is_class_v<T> && std::is_aggregate_v<T>;
+    inline constexpr bool is_struct_v = std::is_class_v<T> && std::is_aggregate_v<T> && !is_flat_array<T>{};
 
     template <typename T>
     inline constexpr bool is_range_v = is_continuous_v<T> || is_noncontinuous_range_v<T>;
@@ -122,6 +139,17 @@ namespace myelin {
         is_set<std::remove_cvref_t<T>>::value || 
         is_unordered_set<std::remove_cvref_t<T>>::value;
 
+    template <typename T>
+    struct get_base_type { using type = T; };
+
+    template <typename T, std::size_t N>
+    struct get_base_type<std::array<T, N>> { 
+        using type = typename get_base_type<T>::type; 
+    };
+
+    template <typename T>
+    using get_base_type_t = typename get_base_type<T>::type;
+    
 }
 // --- End of traits.hpp ---
 
@@ -478,7 +506,32 @@ namespace myelin {
         return out;
     }
 
-template <typename Derived, endian_policy Policy = endian_policy::native>
+    template <typename T, endian_policy Policy>
+    inline std::string dump_mult_array(const T& data) {
+        using I = std::ranges::range_value_t<T>;
+        std::string out = "[ ";
+        
+        size_t count = std::ranges::size(data);
+        size_t i = 0;
+
+        for (const auto& element : data) {
+            if constexpr (std::is_arithmetic_v<I>) {
+                I val = apply_policy<Policy>(element);
+                if constexpr (std::is_same_v<I, bool>) out += (val ? "true" : "false");
+                else if constexpr (std::is_integral_v<I> && sizeof(I) == 1) out += myelin::to_string((int)val);
+                else out += myelin::to_string(val);
+            } else {
+                out += dump_mult_array<I, Policy>(element);
+            }
+
+            if (++i < count) out += ", ";
+        }
+
+        out += " ]";
+        return out;
+    }
+
+    template <typename Derived, endian_policy Policy = endian_policy::native>
     class nested_view {
         static constexpr uint32_t num_fields = boost::pfr::tuple_size_v<Derived>;
         static constexpr size_t header_size = num_fields * 5;
@@ -668,6 +721,47 @@ template <typename Derived, endian_policy Policy = endian_policy::native>
         return output;
     }
 
+    template <typename T, size_t... Dims>
+    struct mult_view;
+
+    template <typename T, size_t N, size_t... NextDims>
+    struct mult_view<T, N, NextDims...> {
+        T* ptr;
+        static constexpr size_t stride = (NextDims * ...);
+
+        inline auto operator[](size_t i) { return mult_view<T, NextDims...>{ ptr + (i * stride) }; }
+        inline const auto operator[](size_t i) const { return mult_view<T, NextDims...>{ ptr + (i * stride) }; }
+
+        inline size_t size() const { return N; }
+        inline T* data() const { return ptr; }
+    };
+
+    template <typename T, size_t N>
+    struct mult_view<T, N> {
+        T* ptr;
+        inline T& operator[](size_t i) { return ptr[i]; }
+        inline const T& operator[](size_t i) const { return ptr[i]; }
+        
+        inline size_t size() const { return N; }
+        inline T* data() const { return ptr; }
+    };
+
+    template <typename T>
+    struct array_traits {
+        template <typename P, size_t... D>
+        static auto make_view(P* p) { 
+            return mult_view<P, D...>{ p }; 
+        }
+    };
+
+    template <typename T, size_t N>
+    struct array_traits<std::array<T, N>> {
+        template <typename P, size_t... D>
+        static auto make_view(P* p) {
+            return array_traits<T>::template make_view<P, D..., N>(p);
+        }
+    };
+
 }
 // --- End of utils.hpp ---
 
@@ -696,12 +790,11 @@ namespace myelin {
                 using T = std::decay_t<decltype(field)>;
                 if constexpr (is_continuous_v<T>) {
                     ++counts[4];
-                    // +16 bytes for 4-byte size header and alignment padding
-                    req += (std::ranges::size(field) * sizeof(std::ranges::range_value_t<T>)) + 11; 
+                    if constexpr (is_flat_array<T>{}) req += (sizeof(T)) + 11;
+                    else req += (std::ranges::size(field) * sizeof(std::ranges::range_value_t<T>)) + 11; 
                 } else if constexpr (is_struct_v<T>) {
                     ++counts[4];
                     nested.push_back(myelin::recur_data());
-                    // FIX: Add +16 padding allowance for struct alignment!
                     req += recur_view<T, Policy>().size(field, nested.back()) + 11; 
                 } else if constexpr (is_noncontinuous_range_v<T>) {
                     ++counts[4];
@@ -717,7 +810,6 @@ namespace myelin {
                     constexpr size_t a = alignof(T);
                     if (a >= 8) ++counts[0]; else if (a == 4) ++counts[1];
                     else if (a == 2) ++counts[2]; else ++counts[3];
-                    // Scalars are packed perfectly by the bucket sort, no dynamic padding needed
                     req += sizeof(T); 
                 }
             });
@@ -754,21 +846,37 @@ namespace myelin {
                 } else if constexpr (is_continuous_v<T>) {
                     blob_cursor = align_to(blob_cursor, 4);
                     uint32_t write_off = (uint32_t)blob_cursor;
-                    using E = std::ranges::range_value_t<T>;
-                    uint32_t d_sz = (uint32_t)(std::ranges::size(field) * sizeof(E));
                     
+                    uint32_t d_sz;
+                    size_t d_start;
+
+                    if constexpr (is_flat_array<T>{}) {
+                        // For multidimensional std::array, use raw sizeof and base type alignment
+                        d_sz = (uint32_t)sizeof(T);
+                        d_start = align_to(write_off + 4, alignof(get_base_type_t<T>));
+                    } else {
+                        // For std::vector/std::string, E is the element type (e.g., char)
+                        using E = std::ranges::range_value_t<T>;
+                        d_sz = (uint32_t)(std::ranges::size(field) * sizeof(E));
+                        d_start = align_to(write_off + 4, alignof(E));
+                    }
+
                     uint32_t le_off = apply_policy<Policy>(write_off);
                     std::memcpy(&this->header_ptr[idx * 5 + 1], &le_off, 4);
                     uint32_t le_sz = apply_policy<Policy>(d_sz);
                     std::memcpy(this->body_ptr + write_off, &le_sz, 4);
-                    
-                    size_t d_start = align_to(write_off + 4, alignof(E));
-                    std::memcpy(this->body_ptr + d_start, std::ranges::data(field), d_sz);
+
+                    // Use safe_data helper or cast &field for flat arrays
+                    const void* src = is_flat_array<T>{} ? (const void*)&field : (const void*)std::ranges::data(field);
+                    std::memcpy(this->body_ptr + d_start, src, d_sz);
                     blob_cursor = d_start + d_sz;
-    
-                    if constexpr (Policy == endian_policy::network) {
-                        std::span<E> dest_span((E*)(this->body_ptr + d_start), d_sz / sizeof(E));
-                        flipEndiannessBlob(dest_span);
+
+                    if constexpr (Policy == endian_policy::network && !is_flat_array<T>{}) {
+                        using E = std::ranges::range_value_t<T>;
+                        if constexpr (sizeof(E) > 1) {
+                            std::span<E> dest_span((E*)(this->body_ptr + d_start), d_sz / sizeof(E));
+                            flipEndiannessBlob(dest_span);
+                        }
                     }
 
                 } else if constexpr (is_map_type_v<T>) {
@@ -849,7 +957,8 @@ namespace myelin {
         template <std::size_t N>
         auto get_field() const {
             using T = boost::pfr::tuple_element_t<N, Derived>;
-            uint32_t b_off; std::memcpy(&b_off, &header_ptr[N * 5 + 1], 4);
+            uint32_t b_off; 
+            std::memcpy(&b_off, &header_ptr[N * 5 + 1], 4);
             b_off = apply_policy<Policy>(b_off);
 
             if constexpr (is_struct_v<T>) {
@@ -861,6 +970,12 @@ namespace myelin {
                 sz = apply_policy<Policy>(sz);
                 size_t start = align_to(b_off + 4, alignof(uint32_t));
                 return std::span<uint8_t>((uint8_t*)(body_ptr + start), sz);
+            } else if constexpr (is_flat_array<T>{}) {
+                using Leaf = get_base_type_t<T>;
+                size_t start = align_to(b_off + 4, alignof(Leaf));
+                Leaf* raw_ptr = reinterpret_cast<Leaf*>(body_ptr + start);
+                
+                return array_traits<T>::template make_view<Leaf>(raw_ptr);
             } else if constexpr (is_range_v<T>) {
                 uint32_t sz; std::memcpy(&sz, body_ptr + b_off, 4);
                 sz = apply_policy<Policy>(sz);
@@ -917,7 +1032,6 @@ namespace myelin {
                     output += "{ ";
                     for (size_t i = 0; i < map.size(); ++i) {
                         auto p = map.pair_at(i);
-                        // JSON strictly requires keys to be strings
                         output += "\"" + myelin::to_string(std::get<0>(p)) + "\": " + myelin::to_string(std::get<1>(p));
                         if (i != map.size() - 1) output += ", ";
                     }
@@ -928,11 +1042,17 @@ namespace myelin {
                     sz = apply_policy<Policy>(sz);
                     
                     using E = std::ranges::range_value_t<T>;
-                    size_t st = align_to(b_off + 4, alignof(E));
+                    size_t st = align_to(b_off + 4, alignof(get_base_type_t<T>));
                     
                     if constexpr (is_string_type_v<T>) {
                         output += "\"" + std::string((char*)(this->body_ptr + st), sz) + "\"";
+                    } else if constexpr (is_flat_array<T>{}) {
+                        // --- THE FIX ---
+                        // Cast the raw blob back to the multidimensional array type
+                        const T& arr = *(const T*)(this->body_ptr + st);
+                        output += dump_mult_array<T, Policy>(arr);
                     } else {
+                        // Normal flat vector/span logic
                         output += dumpBlob<std::span<E>, Policy>(std::span<E>((E*)(this->body_ptr + st), sz / sizeof(E)));
                     }
                 } else if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T> || std::is_same_v<T, bool>) {
@@ -1072,7 +1192,6 @@ namespace myelin {
             if (file_size > 0) {
                 region = MemoryMapper::map(fd, file_size, 0);
                 
-                // Offset by 4 bytes to skip the num_fields header
                 this->header_ptr = (uint8_t*)region.addr + 4;
                 
                 uint32_t b_sz; 

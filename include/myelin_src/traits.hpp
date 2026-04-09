@@ -54,15 +54,32 @@ namespace myelin {
 
     template <typename T>
     inline constexpr bool is_string_type_v = std::is_same_v<std::decay_t<T>, std::string> || std::is_same_v<std::decay_t<T>, std::string_view>;
+
+    template <typename T>
+    struct is_flat_array : std::false_type {
+        // Inherits operator bool() from std::false_type (returns false)
+    };
+
+    template <typename T, std::size_t N>
+    struct is_flat_array<std::array<T, N>> : 
+        std::bool_constant<std::is_arithmetic_v<T> || is_flat_array<T>::value> 
+    {};
     
     template <typename T>
-    inline constexpr bool is_continuous_v = std::ranges::contiguous_range<T> && !std::is_array_v<std::decay_t<T>>;
+    struct flat_array_count : std::integral_constant<size_t, 1> {};
+
+    template <typename T, std::size_t N>
+    struct flat_array_count<std::array<T, N>> : 
+        std::integral_constant<size_t, N * flat_array_count<T>::value> {};
+
+    template <typename T>
+    inline constexpr bool is_continuous_v = (std::ranges::contiguous_range<T> || is_flat_array<T>{}) && !std::is_array_v<std::decay_t<T>>;
 
     template <typename T>
     inline constexpr bool is_noncontinuous_range_v = !std::ranges::contiguous_range<T> && !std::is_scalar_v<T>;
 
     template <typename T>
-    inline constexpr bool is_struct_v = std::is_class_v<T> && std::is_aggregate_v<T>;
+    inline constexpr bool is_struct_v = std::is_class_v<T> && std::is_aggregate_v<T> && !is_flat_array<T>{};
 
     template <typename T>
     inline constexpr bool is_range_v = is_continuous_v<T> || is_noncontinuous_range_v<T>;
@@ -117,4 +134,15 @@ namespace myelin {
         is_set<std::remove_cvref_t<T>>::value || 
         is_unordered_set<std::remove_cvref_t<T>>::value;
 
+    template <typename T>
+    struct get_base_type { using type = T; };
+
+    template <typename T, std::size_t N>
+    struct get_base_type<std::array<T, N>> { 
+        using type = typename get_base_type<T>::type; 
+    };
+
+    template <typename T>
+    using get_base_type_t = typename get_base_type<T>::type;
+    
 }

@@ -352,7 +352,32 @@ namespace myelin {
         return out;
     }
 
-template <typename Derived, endian_policy Policy = endian_policy::native>
+    template <typename T, endian_policy Policy>
+    inline std::string dump_mult_array(const T& data) {
+        using I = std::ranges::range_value_t<T>;
+        std::string out = "[ ";
+        
+        size_t count = std::ranges::size(data);
+        size_t i = 0;
+
+        for (const auto& element : data) {
+            if constexpr (std::is_arithmetic_v<I>) {
+                I val = apply_policy<Policy>(element);
+                if constexpr (std::is_same_v<I, bool>) out += (val ? "true" : "false");
+                else if constexpr (std::is_integral_v<I> && sizeof(I) == 1) out += myelin::to_string((int)val);
+                else out += myelin::to_string(val);
+            } else {
+                out += dump_mult_array<I, Policy>(element);
+            }
+
+            if (++i < count) out += ", ";
+        }
+
+        out += " ]";
+        return out;
+    }
+
+    template <typename Derived, endian_policy Policy = endian_policy::native>
     class nested_view {
         static constexpr uint32_t num_fields = boost::pfr::tuple_size_v<Derived>;
         static constexpr size_t header_size = num_fields * 5;
@@ -541,5 +566,46 @@ template <typename Derived, endian_policy Policy = endian_policy::native>
         output += "}";
         return output;
     }
+
+    template <typename T, size_t... Dims>
+    struct mult_view;
+
+    template <typename T, size_t N, size_t... NextDims>
+    struct mult_view<T, N, NextDims...> {
+        T* ptr;
+        static constexpr size_t stride = (NextDims * ...);
+
+        inline auto operator[](size_t i) { return mult_view<T, NextDims...>{ ptr + (i * stride) }; }
+        inline const auto operator[](size_t i) const { return mult_view<T, NextDims...>{ ptr + (i * stride) }; }
+
+        inline size_t size() const { return N; }
+        inline T* data() const { return ptr; }
+    };
+
+    template <typename T, size_t N>
+    struct mult_view<T, N> {
+        T* ptr;
+        inline T& operator[](size_t i) { return ptr[i]; }
+        inline const T& operator[](size_t i) const { return ptr[i]; }
+        
+        inline size_t size() const { return N; }
+        inline T* data() const { return ptr; }
+    };
+
+    template <typename T>
+    struct array_traits {
+        template <typename P, size_t... D>
+        static auto make_view(P* p) { 
+            return mult_view<P, D...>{ p }; 
+        }
+    };
+
+    template <typename T, size_t N>
+    struct array_traits<std::array<T, N>> {
+        template <typename P, size_t... D>
+        static auto make_view(P* p) {
+            return array_traits<T>::template make_view<P, D..., N>(p);
+        }
+    };
 
 }
