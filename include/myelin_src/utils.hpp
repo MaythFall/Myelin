@@ -145,8 +145,7 @@ namespace myelin {
     struct recur_data {
         size_t header_size = 0;
         size_t body_size = 0;
-        uint8_t count[5] = {0,0,0,0,0};
-        std::vector<recur_data> nested;
+        uint16_t count[5] = {0,0,0,0,0};
     };
 
     template <typename T>
@@ -607,5 +606,60 @@ namespace myelin {
             return array_traits<T>::template make_view<P, D..., N>(p);
         }
     };
+
+    template<typename T>
+    inline std::string struct_to_json(const T& obj) {
+        std::string output;
+        constexpr size_t field_count = boost::pfr::tuple_size_v<T>;
+        
+        // Safety check for empty structs
+        if constexpr (field_count == 0) return "{}";
+
+        output.reserve(128); // Small starting buffer
+        output += "{ ";
+        size_t current = 0;
+
+        boost::pfr::for_each_field(obj, [&](const auto& field) {
+            using FieldT = std::decay_t<decltype(field)>;
+            
+            // Use PFR to get the field name if available, otherwise use index
+            // Note: pfr::get_name requires C++20 and specific compiler support
+            output += "\"" + std::to_string(current) + "\" : ";
+
+            if constexpr (is_struct_v<FieldT>) {
+                // Recurse for nested structs
+                output += struct_to_json(field);
+            } else if constexpr (is_range_v<FieldT> && !is_string_type_v<FieldT>) {
+                // Handle arrays/vectors within the struct
+                output += "[ ";
+                size_t i = 0;
+                size_t sz = std::ranges::size(field);
+                for (const auto& item : field) {
+                    if constexpr (std::is_arithmetic_v<std::decay_t<decltype(item)>>) {
+                        output += myelin::to_string(item);
+                    } else {
+                        output += "\"[Complex Item]\"";
+                    }
+                    if (++i < sz) output += ", ";
+                }
+                output += " ]";
+            } else if constexpr (is_string_type_v<FieldT>) {
+                output += "\"" + std::string(field) + "\"";
+            } else if constexpr (std::is_arithmetic_v<FieldT> || std::is_enum_v<FieldT> || std::is_same_v<FieldT, bool>) {
+                if constexpr (std::is_same_v<FieldT, bool>) {
+                    output += (field ? "true" : "false");
+                } else {
+                    output += myelin::to_string(field);
+                }
+            } else {
+                output += "\"[Unknown Type]\"";
+            }
+
+            if (++current < field_count) output += ", ";
+        });
+
+        output += " }";
+        return output;
+    }
 
 }

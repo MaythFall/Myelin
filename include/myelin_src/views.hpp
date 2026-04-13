@@ -10,54 +10,71 @@ namespace myelin {
     struct basic_view {
         static constexpr uint32_t num_fields = boost::pfr::tuple_size_v<Derived>;
         static constexpr size_t header_size = num_fields * 5;
+        static constexpr size_t num_nested = myelin::num_nests_v<Derived>;
 
         uint8_t* header_ptr = nullptr;
         uint8_t* body_ptr = nullptr;
         size_t   act_size = 0;
 
-        size_t nest_idx = 0;
-        std::vector<myelin::recur_data> nested;
 
-        inline size_t resize_calc(const Derived& obj, uint8_t* counts) {
+        std::array<myelin::recur_data, num_nested> nested_metadata;
+        size_t nest_cursor = 0;
+
+        inline size_t total_size() const { return header_size + act_size; }
+        inline size_t body_size() const { return act_size; }
+        inline uint8_t* h_data() { return header_ptr; }
+        inline uint8_t* b_data() { return body_ptr; }
+
+        inline uint8_t* h_tail() { return header_ptr + header_size; }
+        inline uint8_t* b_tail() { return body_ptr + act_size; }
+
+        inline size_t resize_calc(const Derived& obj, uint16_t* counts) {
+            nest_cursor = 0;
             size_t req = 0;
             boost::pfr::for_each_field(obj, [&](const auto& field) {
                 using T = std::decay_t<decltype(field)>;
                 if constexpr (is_continuous_v<T>) {
                     ++counts[4];
                     if constexpr (is_flat_array<T>{}) req += (sizeof(T)) + 11;
-                    else req += (std::ranges::size(field) * sizeof(std::ranges::range_value_t<T>)) + 11; 
+                    else req += (std::ranges::size(field) * sizeof(std::ranges::range_value_t<T>)) + 16; 
                 } else if constexpr (is_struct_v<T>) {
                     ++counts[4];
-                    nested.push_back(myelin::recur_data());
-                    req += recur_view<T, Policy>().size(field, nested.back()) + 11; 
+                    if constexpr (std::is_trivially_copyable_v<T>) {
+                        req += sizeof(T) + 16;
+                    } else {
+                        this->nested_metadata[nest_cursor] = (myelin::recur_data());
+                        req += recur_view<T, Policy>::size(field, this->nested_metadata[nest_cursor]) + 32; //safety buffer
+                        ++nest_cursor;
+                    }
                 } else if constexpr (is_noncontinuous_range_v<T>) {
                     ++counts[4];
                     if constexpr (is_map_type_v<T>) {
                         using Pair = std::ranges::range_value_t<T>;
                         using K = std::remove_const_t<std::tuple_element_t<0, Pair>>;
                         using V = std::tuple_element_t<1, Pair>;
-                        req += (std::ranges::size(field) * (sizeof(K) + sizeof(V))) + 11;
+                        req += (std::ranges::size(field) * (sizeof(K) + sizeof(V))) + 16;
                     } else {
-                        req += (std::ranges::size(field) * sizeof(std::ranges::range_value_t<T>)) + 11;
+                        req += (std::ranges::size(field) * sizeof(std::ranges::range_value_t<T>)) + 16;
                     }
                 } else {
                     constexpr size_t a = alignof(T);
-                    if (a >= 8) ++counts[0]; else if (a == 4) ++counts[1];
-                    else if (a == 2) ++counts[2]; else ++counts[3];
-                    req += sizeof(T); 
+                    if      constexpr (a >= 8) { ++counts[0]; req += 8; }
+                    else if constexpr (a == 4) { ++counts[1]; req += 4; }
+                    else if constexpr (a == 2) { ++counts[2]; req += 2; }
+                    else                       { ++counts[3]; req += 1; }
                 }
             });
             return req;
         }
 
-        inline size_t pack_data_bucketed(const Derived& obj, uint8_t* counts) {
+        inline size_t pack_data_bucketed(const Derived& obj, uint16_t* counts) {
             uint32_t cursors[4] = {0};
-            cursors[1] = counts[0] << 3;
-            cursors[2] = cursors[1] + (counts[1] << 2);
-            cursors[3] = cursors[2] + (counts[2] << 1);
-            
-            size_t blob_cursor = cursors[3] + counts[3]; 
+            cursors[1] = ((uint32_t)counts[0] << 3);
+            cursors[2] = cursors[1] + ((uint32_t)counts[1] << 2);
+            cursors[3] = cursors[2] + ((uint32_t)counts[2] << 1);
 
+            size_t blob_cursor = cursors[3] + counts[3];
+            nest_cursor = 0;
             boost::pfr::for_each_field(obj, [&](const auto& field, size_t idx) {
                 using T = std::decay_t<decltype(field)>;
                 this->header_ptr[idx * 5] = (uint8_t)get_type_tag<T>();
@@ -65,7 +82,13 @@ namespace myelin {
                 if constexpr (is_struct_v<T>) {
                     blob_cursor = align_to(blob_cursor, 4);
                     uint32_t write_off = (uint32_t)blob_cursor;
-                    uint32_t d_sz = (uint32_t)(nested[nest_idx].header_size + nested[nest_idx].body_size);
+                    
+                    uint32_t d_sz;
+                    if constexpr (!std::is_trivially_copyable_v<T>) {
+                        d_sz = (uint32_t)(this->nested_metadata[nest_cursor].header_size + this->nested_metadata[nest_cursor].body_size);
+                    } else {
+                        d_sz = (uint32_t)sizeof(T);
+                    }
 
                     uint32_t le_off = apply_policy<Policy>(write_off);
                     std::memcpy(&this->header_ptr[idx * 5 + 1], &le_off, 4);
@@ -74,9 +97,14 @@ namespace myelin {
                     std::memcpy(this->body_ptr + write_off, &le_sz, 4);
                     
                     size_t d_start = write_off + 4;
-                    recur_view<T, Policy>().serialize(field, nested[nest_idx++], this->body_ptr + d_start);
+                    
+                    if constexpr (!std::is_trivially_copyable_v<T>) {
+                        recur_view<T, Policy>().serialize(field, this->nested_metadata[nest_cursor++], this->body_ptr + d_start);
+                    } else {
+                        d_start = align_to(d_start, alignof(T)); // FIX: Use alignof(T)
+                        std::memcpy(this->body_ptr + d_start, &field, sizeof(field));
+                    }
                     blob_cursor = d_start + d_sz;
-
                 } else if constexpr (is_continuous_v<T>) {
                     blob_cursor = align_to(blob_cursor, 4);
                     uint32_t write_off = (uint32_t)blob_cursor;
@@ -248,9 +276,14 @@ namespace myelin {
                     sz = apply_policy<Policy>(sz);
                     
                     auto child_span = std::span<const uint8_t>((const uint8_t*)(this->body_ptr + b_off + 4), sz);
-                    nested_view<T, Policy> t;
-                    myelin::structify<T, Policy>(child_span, t);
-                    output += t.to_json();
+                    if constexpr(!std::is_trivially_copyable_v<T>) {
+                        nested_view<T, Policy> t;
+                        myelin::structify<T, Policy>(child_span, t);
+                        output += t.to_json();
+                    } else {
+                        const T& t = *reinterpret_cast<const T*>(child_span.data());
+                        output += struct_to_json<T>(t);
+                    }
                 } else if constexpr (is_map_type_v<T>) {
                     using Pair = std::ranges::range_value_t<T>;
                     using K = std::remove_const_t<std::tuple_element_t<0, Pair>>;
@@ -276,17 +309,14 @@ namespace myelin {
                     sz = apply_policy<Policy>(sz);
                     
                     using E = std::ranges::range_value_t<T>;
-                    size_t st = align_to(b_off + 4, alignof(get_base_type_t<T>));
+                    size_t st = b_off + 4;
                     
                     if constexpr (is_string_type_v<T>) {
                         output += "\"" + std::string((char*)(this->body_ptr + st), sz) + "\"";
                     } else if constexpr (is_flat_array<T>{}) {
-                        // --- THE FIX ---
-                        // Cast the raw blob back to the multidimensional array type
                         const T& arr = *(const T*)(this->body_ptr + st);
                         output += dump_mult_array<T, Policy>(arr);
                     } else {
-                        // Normal flat vector/span logic
                         output += dumpBlob<std::span<E>, Policy>(std::span<E>((E*)(this->body_ptr + st), sz / sizeof(E)));
                     }
                 } else if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T> || std::is_same_v<T, bool>) {
@@ -306,7 +336,7 @@ namespace myelin {
                 }
 
                 output += (current < num_fields - 1) ? " },\n" : " }\n";
-                current++;
+                ++current;
             });
 
             output += "]";
@@ -314,6 +344,63 @@ namespace myelin {
             return output;
         }
 
+        inline void deserialize(Derived& dest) {
+            size_t current = 0;
+            boost::pfr::for_each_field(dest, [&](auto& dummy) {
+                using T = std::decay_t<decltype(dummy)>;
+                uint32_t b_off; 
+                std::memcpy(&b_off, &this->header_ptr[current * 5 + 1], 4);
+                b_off = apply_policy<Policy>(b_off);
+
+                if constexpr (is_struct_v<T>) {
+                    uint32_t sz; 
+                    std::memcpy(&sz, this->body_ptr + b_off, 4);
+                    sz = apply_policy<Policy>(sz);
+
+                    if constexpr (!std::is_trivially_copyable_v<T>) {
+                        recur_view<T, Policy> v;
+                        v.header_ptr = this->body_ptr + b_off + 4;
+                        v.body_ptr = v.header_ptr + v.header_size;
+                        v.deserialize(std::span<uint8_t>((uint8_t*)(body_ptr + b_off + 4), sz), dummy); 
+                    } else {
+                        size_t st = align_to(b_off + 4, alignof(T));
+                        std::memcpy(&dummy, this->body_ptr + st, sizeof(T));
+                    }
+                } else if constexpr (is_map_type_v<T>) {
+                    using Pair = std::ranges::range_value_t<T>;
+                    using K = std::remove_const_t<std::tuple_element_t<0, Pair>>;
+                    using V = std::tuple_element_t<1, Pair>;
+                    
+                    uint32_t sz; 
+                    std::memcpy(&sz, this->body_ptr + b_off, 4);
+                    sz = apply_policy<Policy>(sz);
+                    
+                    myelin::mapify(std::span<const uint8_t>((const uint8_t*)(this->body_ptr + b_off + 4), sz), dummy);
+                } else if constexpr (is_range_v<T>) {
+                    uint32_t sz; 
+                    std::memcpy(&sz, this->body_ptr + b_off, 4);
+                    sz = apply_policy<Policy>(sz);
+
+                    using E = std::ranges::range_value_t<T>;
+                    size_t st = b_off + 4; 
+                    
+                    if constexpr (is_string_type_v<T>) {
+                        dummy = std::string((char*)(this->body_ptr + st), sz);
+                    } else {
+                        auto s = std::span<E>((E*)(this->body_ptr + st), sz / sizeof(E));
+                        dummy.assign(s.begin(), s.end());
+                    }
+                } else if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T> || std::is_same_v<T, bool>) {
+                    T val;
+                    std::memcpy(&val, this->body_ptr + b_off, sizeof(T));
+                    val = apply_policy<Policy>(val); 
+                    dummy = val;
+                } else {
+                    throw std::runtime_error("Deserialize Error");
+                }
+                ++current;
+            });
+        }
     };
 
 
@@ -324,7 +411,7 @@ namespace myelin {
             basic_view<Derived, myelin::recur_view<Derived, Policy>, Policy> temp;
             
             store.body_size = temp.resize_calc(obj, store.count);
-            store.nested = std::move(temp.nested);
+            //store = std::move(temp.nested);
             
             for (auto &i : store.count) store.header_size += i;
             return store.body_size + (store.header_size *= 5);
@@ -334,9 +421,19 @@ namespace myelin {
             this->header_ptr = dest;
             this->body_ptr = dest + this->header_size;
             
-            this->nested = data.nested;
+            //this->nested = data.nested;
             
-            this->act_size = this->pack_data_bucketed(obj, (uint8_t*)(data.count));
+            this->act_size = this->pack_data_bucketed(obj, (uint16_t*)(data.count));
+        }
+
+        inline void deserialize(std::span<const uint8_t> data, Derived& dest) {
+            // 1. Point the view's internal pointers at the provided span
+            this->header_ptr = const_cast<uint8_t*>(data.data());
+            this->body_ptr   = this->header_ptr + this->header_size;
+
+            // 2. Call the base basic_view::deserialize(dest)
+            // This uses the current++ logic we just fixed
+            basic_view<Derived, recur_view<Derived, Policy>, Policy>::deserialize(dest);
         }
 
     };
@@ -346,11 +443,11 @@ namespace myelin {
     struct mem_view : public basic_view<Derived, mem_view<Derived, Policy>, Policy> {
         std::array<uint8_t, basic_view<Derived, mem_view<Derived, Policy>, Policy>::header_size> h_buf{};
         size_t capacity = 0;
-        mem_view() { this->header_ptr = h_buf.data(); }
+        mem_view() { this->header_ptr = h_buf.data();}
         ~mem_view() { if (this->body_ptr) free(this->body_ptr); }
 
         inline void serialize(const Derived& obj) {
-            uint8_t counts[5] = {0}; 
+            uint16_t counts[5] = {0}; 
             size_t req = this->resize_calc(obj, counts);
             if (req > capacity) {
                 capacity = req;
@@ -449,7 +546,7 @@ namespace myelin {
         inline void serialize(const Derived& obj, const std::string& new_note = "") {
             if (fd == -1) return;
             std::string note = new_note.empty() ? get_note() : new_note; 
-            uint8_t counts[5] = {0}; 
+            uint16_t counts[5] = {0}; 
             size_t req_body = this->resize_calc(obj, counts);
             
             size_t note_total = note.empty() ? 0 : (note.size() + 11);

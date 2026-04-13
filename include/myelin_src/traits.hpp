@@ -144,5 +144,23 @@ namespace myelin {
 
     template <typename T>
     using get_base_type_t = typename get_base_type<T>::type;
-    
+
+    template <typename T>
+    consteval size_t count_nests() {
+        size_t count = 0;
+        boost::pfr::for_each_field(T{}, [&](const auto& field) {
+            using FieldT = std::decay_t<decltype(field)>;
+            if constexpr (is_struct_v<FieldT> && !std::is_trivially_copyable_v<FieldT>) {
+                count += 1 + count_nests<FieldT>();
+            }
+        });
+        return count;
+    }
+
+    template <typename T>
+    inline constexpr size_t num_nests = count_nests<T>();
+
+    template <typename T>
+    inline constexpr size_t num_nests_v = (num_nests<T> > 0) ? num_nests<T> : 1;
+
 }
