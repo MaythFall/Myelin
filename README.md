@@ -6,7 +6,7 @@
 ---
 
 ### Official Benchmarks
-Benchmarks performed on an AMD Ryzen 9 3900X (Zen 2 architecture @ 4.6GHz).  
+Benchmarks performed on an AMD Ryzen 9 3900X (Zen 2 architecture @ 4.0GHz).  
 All tests conducted and averaged over 5,000,000 iterations and `-O3` optimization.
 
 <table style="width:100%">
@@ -19,26 +19,28 @@ All tests conducted and averaged over 5,000,000 iterations and `-O3` optimizatio
 
 | Operation | Latency | Throughput |
 | :--- | :--- | :--- |
-| **Scalar Ser** | 5.31 ns | 188.3 Mops/s |
-| **Complex Ser** | 9.08 ns | 110.1 Mops/s |
+| **Scalar Ser** | 6.17 ns | 162.0 Mops/s |
+| **Trivial Nest Ser** | 6.82 ns | 147.2 Mops/s |
+| **True Nest Ser** | 10.83 ns | 93.2 Mops/s |
 | **Messy Ser** | 33.10 ns | 30.2 Mops/s |
-| **Mem Access** | 0.62 ns | 1612.9 Mops/s |
+| **Mem Access** | 0.51 ns | 1960.8 Mops/s |
 | **Map Lookup** | 4.18 ns | 239.2 Mops/s |
 | **Set Lookup** | 2.83 ns | 353.4 Mops/s |
-| **JSON Export** | 630.41 ns | 1.59 Mops/s |
+| **JSON Export** | 794.33 ns | 1.26 Mops/s |
 
 </td>
 <td valign="top">
 
 | Operation | Latency | Throughput |
 | :--- | :--- | :--- |
-| **Scalar Ser** | 13.10 ns | 76.3 Mops/s |
-| **Complex Ser** | 22.80 ns | 43.8 Mops/s |
+| **Scalar Ser** | 13.97 ns | 72.0 Mops/s |
+| **Trivial Nest Ser** | 16.34 ns | 61.2 Mops/s |
+| **True Nest Ser** | 18.92 ns | 52.9 Mops/s |
 | **Messy Ser** | 43.50 ns | 22.9 Mops/s |
-| **Mmap Access** | 0.59 ns | 1694.9 Mops/s |
+| **Mmap Access** | 0.33 ns | 3030.3 Mops/s |
 | **Mmap Map Lookup** | 4.10 ns | 243.9 Mops/s |
 | **Mmap Set Lookup** | 2.75 ns | 363.6 Mops/s |
-| **JSON Export** | 599.81 ns | 1.67 Mops/s |
+| **JSON Export** | 878.90 ns | 1.14 Mops/s |
 
 </td>
 </tr>
@@ -56,6 +58,9 @@ All tests conducted and averaged over 5,000,000 iterations and `-O3` optimizatio
 - JSON Map: 565.21ns
 
 </details>
+
+> [!NOTE]
+> Performance can be improved further with the `-flto` flag bringing basic serialization to uinder **5ns**.
 
 ### Performance vs. Other C++ Serializers
 
@@ -157,8 +162,6 @@ myelin::structify<Weapon>(weapon_blob, weapon_view);
 auto damage = weapon_view.get_field<1>();
 ```
 
-> [!NOTE]
-> ***Optimization Roadmap***: While fixed-size nested structs are highly performant, deep recursion currently adds metadata overhead. Strategies for "Recursive Flattening" are currently being profiled for the v1.2 release.
 ---
  
 ## Installation
@@ -293,6 +296,22 @@ void process() {
 > [!Warning]
 > ### Unordered Maps with Duplicate Keys
 > **Myelin** does not support quick mapify extraction for maps with duplicate keys. To extract them out the overloaded `mapify(data, Output_Map)` must be used. 
+
+### Deserializing
+
+```cpp
+void deserialize() {
+    myelin::mem_view<Packet> view;
+    Packet p{42, 3.14, "Velocity"};
+    view.serialize(p);
+
+    Packet out;
+    //Copies data out, not meant for zero-copy access
+    view.deserialize(out);
+
+    //out.id == 42
+}
+```
 
 > [!NOTE]
 > ### The "ASan Tax"  
