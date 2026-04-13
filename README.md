@@ -60,7 +60,7 @@ All tests conducted and averaged over 5,000,000 iterations and `-O3` optimizatio
 </details>
 
 > [!NOTE]
-> Performance can be improved further with the `-flto` flag bringing basic serialization to uinder **5ns**.
+> Performance can be improved further with the `-flto` flag, bringing basic serialization under **5ns**.
 
 ### Performance vs. Other C++ Serializers
 
@@ -93,6 +93,7 @@ All tests conducted and averaged over 5,000,000 iterations and `-O3` optimizatio
 | 9 | **6.15** | **24.77** | 64.26 |
 | 10 | 6.72 | 24.97 | 65.28 |
 | 11 | 6.25 | 25.78 | 63.46 |
+
 
 <small>Units are ns/op</small>
 
